@@ -610,9 +610,13 @@ export async function readSection(vaultPath, notePath, options = {}) {
     let headingLineIdx = -1;
     let headingLevel = 0;
 
+    // Strip emoji and extra whitespace for fuzzy heading match
+    const stripEmoji = (str) => str.replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, '').replace(/\s+/g, ' ').trim();
+    const normalizedQuery = stripEmoji(heading).toLowerCase();
+
     for (let i = 0; i < lines.length; i++) {
       const match = lines[i].match(/^(#{1,6})\s+(.*)$/);
-      if (match && match[2].trim().toLowerCase() === heading.trim().toLowerCase()) {
+      if (match && stripEmoji(match[2]).toLowerCase() === normalizedQuery) {
         headingLineIdx = i;
         headingLevel = match[1].length;
         break;
