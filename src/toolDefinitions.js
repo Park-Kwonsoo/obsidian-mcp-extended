@@ -719,4 +719,164 @@ export const toolDefinitions = [
       additionalProperties: false
     }
   },
+  {
+    name: 'read-section',
+    title: 'Read Section',
+    description: 'Read a specific section (by heading) or line range from a note, instead of reading the entire file. Use this to save tokens when you only need part of a document.',
+    inputSchema: {
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'Path to the note relative to vault root',
+          minLength: 1,
+          pattern: '\\.md$'
+        },
+        heading: {
+          type: 'string',
+          description: 'Heading text to find (returns that section and all content until the next heading of same or higher level)'
+        },
+        startLine: {
+          type: 'integer',
+          description: 'Start line number (1-based)',
+          minimum: 1
+        },
+        endLine: {
+          type: 'integer',
+          description: 'End line number (1-based, inclusive)',
+          minimum: 1
+        }
+      },
+      required: ['path'],
+      additionalProperties: false
+    },
+    outputSchema: {
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: {
+        content: {
+          type: 'string',
+          description: 'The extracted section content'
+        },
+        startLine: {
+          type: 'integer',
+          description: 'Start line number of the returned content',
+          minimum: 1
+        },
+        endLine: {
+          type: 'integer',
+          description: 'End line number of the returned content',
+          minimum: 1
+        },
+        totalLines: {
+          type: 'integer',
+          description: 'Total number of lines in the document',
+          minimum: 0
+        }
+      },
+      required: ['content', 'startLine', 'endLine', 'totalLines'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'patch-note',
+    title: 'Patch Note',
+    description: 'Replace specific text in a note without rewriting the entire file. Like a surgical edit — find old_string and replace with new_string.',
+    inputSchema: {
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'Path to the note relative to vault root',
+          minLength: 1,
+          pattern: '\\.md$'
+        },
+        old_string: {
+          type: 'string',
+          description: 'The exact text to find and replace',
+          minLength: 1
+        },
+        new_string: {
+          type: 'string',
+          description: 'The replacement text'
+        },
+        replaceAll: {
+          type: 'boolean',
+          description: 'Replace all occurrences (default: false, errors if multiple matches)',
+          default: false
+        }
+      },
+      required: ['path', 'old_string', 'new_string'],
+      additionalProperties: false
+    },
+    outputSchema: {
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: {
+        changedLines: {
+          type: 'array',
+          items: { type: 'integer' },
+          description: 'Line numbers where changes were made'
+        },
+        totalReplacements: {
+          type: 'integer',
+          description: 'Number of replacements performed',
+          minimum: 1
+        }
+      },
+      required: ['changedLines', 'totalReplacements'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'toggle-checkbox',
+    title: 'Toggle Checkbox',
+    description: 'Toggle a specific checkbox in a note by matching its text. Finds "- [ ] text" or "- [x] text" and sets it to the desired state.',
+    inputSchema: {
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'Path to the note relative to vault root',
+          minLength: 1,
+          pattern: '\\.md$'
+        },
+        text: {
+          type: 'string',
+          description: 'Text content of the checkbox to find (partial match supported)',
+          minLength: 1
+        },
+        checked: {
+          type: 'boolean',
+          description: 'Desired state: true for [x], false for [ ]'
+        }
+      },
+      required: ['path', 'text', 'checked'],
+      additionalProperties: false
+    },
+    outputSchema: {
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: {
+        line: {
+          type: 'integer',
+          description: 'Line number of the toggled checkbox',
+          minimum: 1
+        },
+        before: {
+          type: 'string',
+          description: 'The line content before toggle'
+        },
+        after: {
+          type: 'string',
+          description: 'The line content after toggle'
+        }
+      },
+      required: ['line', 'before', 'after'],
+      additionalProperties: false
+    }
+  },
 ];

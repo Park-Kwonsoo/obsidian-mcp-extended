@@ -3,7 +3,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { searchVault, searchByTitle, listNotes, readNote, writeNote, deleteNote, searchByTags, getNoteMetadata, discoverMocs } from './tools.js';
+import { searchVault, searchByTitle, listNotes, readNote, writeNote, deleteNote, searchByTags, getNoteMetadata, discoverMocs, readSection, patchNote, toggleCheckbox } from './tools.js';
 import { toolDefinitions } from './toolDefinitions.js';
 import { Errors, MCPError } from './errors.js';
 import { textResponse, structuredResponse, errorResponse, createMetadata, stripSearchContext } from './response-formatter.js';
@@ -237,6 +237,52 @@ export function createServer(vaultPath) {
           tool: 'discover-mocs',
           mocsFound: result.count,
           totalLinkedNotes: result.mocs.reduce((sum, moc) => sum + moc.linkCount, 0)
+        });
+
+        return structuredResponse(result, description, metadata);
+      }
+
+      case 'read-section': {
+        const { path: notePath, heading, startLine, endLine } = args;
+        const result = await readSection(vaultPath, notePath, { heading, startLine, endLine });
+
+        const description = heading
+          ? `Read section "${heading}" from ${notePath} (lines ${result.startLine}-${result.endLine} of ${result.totalLines})`
+          : `Read lines ${result.startLine}-${result.endLine} of ${result.totalLines} from ${notePath}`;
+
+        const metadata = createMetadata(startTime, {
+          tool: 'read-section',
+          linesReturned: result.endLine - result.startLine + 1,
+          totalLines: result.totalLines
+        });
+
+        return structuredResponse(result, description, metadata);
+      }
+
+      case 'patch-note': {
+        const { path: notePath, old_string: oldString, new_string: newString, replaceAll = false } = args;
+        const result = await patchNote(vaultPath, notePath, oldString, newString, replaceAll);
+
+        const description = `Patched ${notePath}: ${result.totalReplacements} replacement(s) at line(s) ${result.changedLines.join(', ')}`;
+
+        const metadata = createMetadata(startTime, {
+          tool: 'patch-note',
+          replacements: result.totalReplacements
+        });
+
+        return structuredResponse(result, description, metadata);
+      }
+
+      case 'toggle-checkbox': {
+        const { path: notePath, text, checked } = args;
+        const result = await toggleCheckbox(vaultPath, notePath, text, checked);
+
+        const state = checked ? 'checked' : 'unchecked';
+        const description = `Toggled checkbox to ${state} at line ${result.line} in ${notePath}`;
+
+        const metadata = createMetadata(startTime, {
+          tool: 'toggle-checkbox',
+          line: result.line
         });
 
         return structuredResponse(result, description, metadata);

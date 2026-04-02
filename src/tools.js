@@ -579,5 +579,237 @@ export async function discoverMocs(vaultPath, options = {}) {
   };
 }
 
+/**
+ * Read a specific section or line range from a note
+ */
+export async function readSection(vaultPath, notePath, options = {}) {
+  const { heading, startLine, endLine } = options;
+
+  // Must specify heading or line range
+  if (!heading && !startLine) {
+    throw Errors.invalidParams('Either heading or startLine must be specified');
+  }
+
+  // Pure validations
+  const paramValidation = validateRequiredParameters({ path: notePath }, ['path']);
+  assertValid(paramValidation, (msg) => Errors.invalidParams(msg));
+
+  const extensionValidation = validateMarkdownExtension(notePath);
+  assertValid(extensionValidation, (msg) => Errors.invalidParams(msg, { path: notePath }));
+
+  // Resolve path
+  const fullPath = await resolveNotePath(vaultPath, notePath);
+
+  // Read file
+  const content = await readFile(fullPath, 'utf-8');
+  const lines = content.split('\n');
+  const totalLines = lines.length;
+
+  if (heading) {
+    // Find the heading line
+    let headingLineIdx = -1;
+    let headingLevel = 0;
+
+    for (let i = 0; i < lines.length; i++) {
+      const match = lines[i].match(/^(#{1,6})\s+(.*)$/);
+      if (match && match[2].trim().toLowerCase() === heading.trim().toLowerCase()) {
+        headingLineIdx = i;
+        headingLevel = match[1].length;
+        break;
+      }
+    }
+
+    if (headingLineIdx === -1) {
+      throw Errors.invalidParams(`Heading "${heading}" not found in ${notePath}`);
+    }
+
+    // Find the end of this section (next heading of same or higher level)
+    let sectionEndIdx = lines.length;
+    for (let i = headingLineIdx + 1; i < lines.length; i++) {
+      const match = lines[i].match(/^(#{1,6})\s+/);
+      if (match && match[1].length <= headingLevel) {
+        sectionEndIdx = i;
+        break;
+      }
+    }
+
+    const sectionLines = lines.slice(headingLineIdx, sectionEndIdx);
+    return {
+      content: sectionLines.join('\n'),
+      startLine: headingLineIdx + 1,
+      endLine: sectionEndIdx,
+      totalLines
+    };
+  } else {
+    // Line range mode
+    const start = Math.max(1, startLine);
+    const end = endLine ? Math.min(endLine, totalLines) : totalLines;
+
+    if (start > totalLines) {
+      throw Errors.invalidParams(`startLine ${start} exceeds total lines ${totalLines}`);
+    }
+
+    const sectionLines = lines.slice(start - 1, end);
+    return {
+      content: sectionLines.join('\n'),
+      startLine: start,
+      endLine: end,
+      totalLines
+    };
+  }
+}
+
+/**
+ * Patch a note by replacing specific text
+ */
+export async function patchNote(vaultPath, notePath, oldString, newString, replaceAll = false) {
+  // Pure validations
+  const paramValidation = validateRequiredParameters({ path: notePath, old_string: oldString, new_string: newString }, ['path', 'old_string', 'new_string']);
+  assertValid(paramValidation, (msg) => Errors.invalidParams(msg));
+
+  const extensionValidation = validateMarkdownExtension(notePath);
+  assertValid(extensionValidation, (msg) => Errors.invalidParams(msg, { path: notePath }));
+
+  const pathValidation = validatePathWithinBase(vaultPath, notePath);
+  assertValid(pathValidation, (msg) => Errors.accessDenied(msg, { path: notePath }));
+
+  const fullPath = pathValidation.resolvedPath;
+
+  // Read file
+  let content;
+  try {
+    content = await readFile(fullPath, 'utf-8');
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      throw Errors.resourceNotFound(notePath, { path: notePath });
+    }
+    throw Errors.internalError(`Failed to read note: ${error.message}`, { path: notePath });
+  }
+
+  // Count occurrences
+  let count = 0;
+  let idx = 0;
+  while ((idx = content.indexOf(oldString, idx)) !== -1) {
+    count++;
+    idx += oldString.length;
+  }
+
+  if (count === 0) {
+    throw Errors.invalidParams(`old_string not found in ${notePath}`);
+  }
+
+  if (count > 1 && !replaceAll) {
+    throw Errors.invalidParams(`old_string matches ${count} occurrences in ${notePath}. Use replaceAll: true or provide a more specific string.`);
+  }
+
+  // Find changed line numbers before replacement
+  const linesBefore = content.split('\n');
+  const changedLines = [];
+  idx = 0;
+  while ((idx = content.indexOf(oldString, idx)) !== -1) {
+    // Count newlines before this index to determine line number
+    const lineNum = content.substring(0, idx).split('\n').length;
+    changedLines.push(lineNum);
+    idx += oldString.length;
+    if (!replaceAll) break;
+  }
+
+  // Perform replacement
+  let newContent;
+  if (replaceAll) {
+    newContent = content.split(oldString).join(newString);
+  } else {
+    const firstIdx = content.indexOf(oldString);
+    newContent = content.substring(0, firstIdx) + newString + content.substring(firstIdx + oldString.length);
+  }
+
+  // Write file
+  const sanitizedContent = sanitizeContentPure(newContent);
+  await writeFile(fullPath, sanitizedContent, 'utf-8');
+
+  return {
+    changedLines,
+    totalReplacements: replaceAll ? count : 1
+  };
+}
+
+/**
+ * Toggle a checkbox in a note
+ */
+export async function toggleCheckbox(vaultPath, notePath, text, checked) {
+  // Pure validations
+  const paramValidation = validateRequiredParameters({ path: notePath, text, checked }, ['path', 'text', 'checked']);
+  assertValid(paramValidation, (msg) => Errors.invalidParams(msg));
+
+  const extensionValidation = validateMarkdownExtension(notePath);
+  assertValid(extensionValidation, (msg) => Errors.invalidParams(msg, { path: notePath }));
+
+  const pathValidation = validatePathWithinBase(vaultPath, notePath);
+  assertValid(pathValidation, (msg) => Errors.accessDenied(msg, { path: notePath }));
+
+  const fullPath = pathValidation.resolvedPath;
+
+  // Read file
+  let content;
+  try {
+    content = await readFile(fullPath, 'utf-8');
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      throw Errors.resourceNotFound(notePath, { path: notePath });
+    }
+    throw Errors.internalError(`Failed to read note: ${error.message}`, { path: notePath });
+  }
+
+  const lines = content.split('\n');
+  const checkboxPattern = /^(\s*- \[)[ x](\] .*)$/;
+  const matches = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const match = lines[i].match(checkboxPattern);
+    if (match) {
+      // Extract text after "- [ ] " or "- [x] "
+      const checkboxText = lines[i].replace(/^\s*- \[[ x]\]\s*/, '');
+      if (checkboxText.toLowerCase().includes(text.toLowerCase())) {
+        matches.push({ index: i, line: lines[i] });
+      }
+    }
+  }
+
+  if (matches.length === 0) {
+    throw Errors.invalidParams(`No checkbox found matching "${text}" in ${notePath}`);
+  }
+
+  if (matches.length > 1) {
+    const matchTexts = matches.map(m => `  Line ${m.index + 1}: ${m.line.trim()}`).join('\n');
+    throw Errors.invalidParams(`Multiple checkboxes match "${text}" in ${notePath}:\n${matchTexts}\nProvide more specific text.`);
+  }
+
+  const { index, line: beforeLine } = matches[0];
+  const mark = checked ? 'x' : ' ';
+  const afterLine = beforeLine.replace(/^(\s*- \[)[ x](\].*)$/, `$1${mark}$2`);
+
+  if (beforeLine === afterLine) {
+    // Already in desired state
+    return {
+      line: index + 1,
+      before: beforeLine,
+      after: afterLine
+    };
+  }
+
+  lines[index] = afterLine;
+  const newContent = lines.join('\n');
+
+  // Write file
+  const sanitizedContent = sanitizeContentPure(newContent);
+  await writeFile(fullPath, sanitizedContent, 'utf-8');
+
+  return {
+    line: index + 1,
+    before: beforeLine,
+    after: afterLine
+  };
+}
+
 // Re-export the pure extractTags function for backward compatibility
 export const extractTags = extractTagsPure;
