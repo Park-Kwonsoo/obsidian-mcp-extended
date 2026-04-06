@@ -1,4 +1,4 @@
-export const toolDefinitions = [
+const baseToolDefinitions = [
   {
     name: 'search-vault',
     title: 'Search Vault',
@@ -880,3 +880,146 @@ export const toolDefinitions = [
     }
   },
 ];
+
+/**
+ * CLI-only tool definitions — registered only when Obsidian CLI is available.
+ */
+const cliToolDefinitions = [
+  {
+    name: 'get-backlinks',
+    title: 'Get Backlinks',
+    description: 'Get all notes that link to a specific note (requires Obsidian CLI)',
+    inputSchema: {
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Path to the note' },
+      },
+      required: ['path'],
+    },
+  },
+  {
+    name: 'get-orphans',
+    title: 'Get Orphan Notes',
+    description: 'Find notes with no incoming links (requires Obsidian CLI)',
+    inputSchema: {
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'get-deadends',
+    title: 'Get Dead-end Notes',
+    description: 'Find notes with no outgoing links (requires Obsidian CLI)',
+    inputSchema: {
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'daily-note',
+    title: 'Daily Note',
+    description: 'Read today\'s daily note content (requires Obsidian CLI)',
+    inputSchema: {
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'daily-append',
+    title: 'Append to Daily Note',
+    description: 'Append content to today\'s daily note (requires Obsidian CLI)',
+    inputSchema: {
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: {
+        content: { type: 'string', description: 'Content to append' },
+      },
+      required: ['content'],
+    },
+  },
+  {
+    name: 'move-note',
+    title: 'Move Note',
+    description: 'Move a note to a new location with automatic link updates (requires Obsidian CLI)',
+    inputSchema: {
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Current note path' },
+        to: { type: 'string', description: 'Destination path' },
+      },
+      required: ['path', 'to'],
+    },
+  },
+  {
+    name: 'rename-note',
+    title: 'Rename Note',
+    description: 'Rename a note with automatic link updates (requires Obsidian CLI)',
+    inputSchema: {
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Current note path' },
+        name: { type: 'string', description: 'New name for the note' },
+      },
+      required: ['path', 'name'],
+    },
+  },
+  {
+    name: 'list-templates',
+    title: 'List Templates',
+    description: 'List available templates in the vault (requires Obsidian CLI)',
+    inputSchema: {
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'read-template',
+    title: 'Read Template',
+    description: 'Read a template\'s content, optionally resolving variables (requires Obsidian CLI)',
+    inputSchema: {
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Template name' },
+        resolve: { type: 'boolean', description: 'Resolve template variables (default: false)', default: false },
+      },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'list-tasks',
+    title: 'List Tasks',
+    description: 'List all tasks in the vault with status filtering (requires Obsidian CLI)',
+    inputSchema: {
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: {
+        done: { type: 'boolean', description: 'Show only completed tasks' },
+        todo: { type: 'boolean', description: 'Show only incomplete tasks' },
+        daily: { type: 'boolean', description: 'Show only tasks from today\'s daily note' },
+      },
+    },
+  },
+];
+
+/**
+ * Get tool definitions based on CLI availability.
+ * @param {boolean} cliAvailable - Whether Obsidian CLI is detected
+ * @returns {Array} Tool definitions
+ */
+export function getToolDefinitions(cliAvailable = false) {
+  if (cliAvailable) {
+    return [...baseToolDefinitions, ...cliToolDefinitions];
+  }
+  return baseToolDefinitions;
+}
+
+// Backward-compatible export
+export const toolDefinitions = baseToolDefinitions;

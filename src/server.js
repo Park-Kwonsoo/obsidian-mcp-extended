@@ -3,12 +3,30 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { searchVault, searchByTitle, listNotes, readNote, writeNote, deleteNote, searchByTags, getNoteMetadata, discoverMocs, readSection, patchNote, toggleCheckbox } from './tools.js';
-import { toolDefinitions } from './toolDefinitions.js';
+import { getToolDefinitions } from './toolDefinitions.js';
 import { Errors, MCPError } from './errors.js';
 import { textResponse, structuredResponse, errorResponse, createMetadata, stripSearchContext } from './response-formatter.js';
+import { executeWithFallback } from './backends/resolver.js';
+import { getBacklinks, getOrphans, getDeadends, getDailyNote, appendToDailyNote, moveNote, renameNote, listTemplates, readTemplate, listTasks } from './cli/cli-tools.js';
 
-export function createServer(vaultPath) {
+// Tool name → backend method name mapping
+const toolMethodMap = {
+  'search-vault': 'searchVault',
+  'search-by-title': 'searchByTitle',
+  'list-notes': 'listNotes',
+  'read-note': 'readNote',
+  'write-note': 'writeNote',
+  'delete-note': 'deleteNote',
+  'search-by-tags': 'searchByTags',
+  'get-note-metadata': 'getNoteMetadata',
+  'discover-mocs': 'discoverMocs',
+  'read-section': 'readSection',
+  'patch-note': 'patchNote',
+  'toggle-checkbox': 'toggleCheckbox',
+};
+
+export function createServer(vaultPath, options = {}) {
+  const { cliAvailable = false } = options;
   const server = new Server(
     {
       name: 'obsidian-mcp-filesystem',
@@ -23,9 +41,10 @@ export function createServer(vaultPath) {
     }
   );
 
-  // Define available tools
+  // Define available tools (includes CLI-only tools when CLI is detected)
+  const activeToolDefinitions = getToolDefinitions(cliAvailable);
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: toolDefinitions,
+    tools: activeToolDefinitions,
   }));
 
   // Handle tool calls
@@ -38,7 +57,7 @@ export function createServer(vaultPath) {
       case 'search-vault': {
         const { query, path: searchPath, caseSensitive = false, includeContext = true, contextLines = 2, limit = 100, offset = 0 } = args;
         const contextOptions = { includeContext, contextLines };
-        const result = await searchVault(vaultPath, query, searchPath, caseSensitive, contextOptions, limit, offset);
+        const result = await executeWithFallback('search-vault', 'searchVault', [vaultPath, query, searchPath, caseSensitive, contextOptions, limit, offset]);
 
         let description = result.totalMatches === 0
           ? `No matches found for "${query}"`
@@ -86,7 +105,7 @@ export function createServer(vaultPath) {
 
       case 'search-by-title': {
         const { query, path: searchPath, caseSensitive = false, limit = 100, offset = 0 } = args;
-        const result = await searchByTitle(vaultPath, query, searchPath, caseSensitive, limit, offset);
+        const result = await executeWithFallback('search-by-title', 'searchByTitle', [vaultPath, query, searchPath, caseSensitive, limit, offset]);
 
         let description = result.count === 0
           ? `No notes found with title matching "${query}"`
@@ -107,7 +126,7 @@ export function createServer(vaultPath) {
 
       case 'list-notes': {
         const { directory, limit = 100, offset = 0 } = args;
-        const result = await listNotes(vaultPath, directory, limit, offset);
+        const result = await executeWithFallback('list-notes', 'listNotes', [vaultPath, directory, limit, offset]);
 
         let description = result.count === 0
           ? `No notes found${directory ? ` in ${directory}` : ''}`
@@ -125,7 +144,7 @@ export function createServer(vaultPath) {
 
       case 'read-note': {
         const { path: notePath } = args;
-        const content = await readNote(vaultPath, notePath);
+        const content = await executeWithFallback('read-note', 'readNote', [vaultPath, notePath]);
         
         // For read-note, we return the content directly as text
         const metadata = createMetadata(startTime, { 
@@ -137,7 +156,7 @@ export function createServer(vaultPath) {
 
       case 'write-note': {
         const { path: notePath, content } = args;
-        await writeNote(vaultPath, notePath, content);
+        await executeWithFallback('write-note', 'writeNote', [vaultPath, notePath, content]);
         
         const metadata = createMetadata(startTime, { 
           tool: 'write-note',
@@ -148,15 +167,15 @@ export function createServer(vaultPath) {
 
       case 'delete-note': {
         const { path: notePath } = args;
-        await deleteNote(vaultPath, notePath);
-        
+        await executeWithFallback('delete-note', 'deleteNote', [vaultPath, notePath]);
+
         const metadata = createMetadata(startTime, { tool: 'delete-note' });
         return textResponse(`Note deleted successfully: ${notePath}`, metadata);
       }
 
       case 'search-by-tags': {
         const { tags, directory, caseSensitive = false } = args;
-        const result = await searchByTags(vaultPath, tags, directory, caseSensitive);
+        const result = await executeWithFallback('search-by-tags', 'searchByTags', [vaultPath, tags, directory, caseSensitive]);
 
         const tagList = tags.join(', ');
         const description = result.count === 0
@@ -175,7 +194,7 @@ export function createServer(vaultPath) {
         const { path: notePath, batch = false, directory, limit = 50, offset = 0 } = args;
 
         const pathArg = batch && directory ? directory : notePath;
-        const result = await getNoteMetadata(vaultPath, pathArg, { batch, limit, offset });
+        const result = await executeWithFallback('get-note-metadata', 'getNoteMetadata', [vaultPath, pathArg, { batch, limit, offset }]);
 
         let description;
 
@@ -205,7 +224,7 @@ export function createServer(vaultPath) {
 
       case 'discover-mocs': {
         const { mocName, directory } = args;
-        const result = await discoverMocs(vaultPath, { mocName, directory });
+        const result = await executeWithFallback('discover-mocs', 'discoverMocs', [vaultPath, { mocName, directory }]);
 
         let description = result.count === 0
           ? 'No MOCs found'
@@ -244,7 +263,7 @@ export function createServer(vaultPath) {
 
       case 'read-section': {
         const { path: notePath, heading, startLine, endLine } = args;
-        const result = await readSection(vaultPath, notePath, { heading, startLine, endLine });
+        const result = await executeWithFallback('read-section', 'readSection', [vaultPath, notePath, { heading, startLine, endLine }]);
 
         const description = heading
           ? `Read section "${heading}" from ${notePath} (lines ${result.startLine}-${result.endLine} of ${result.totalLines})`
@@ -261,7 +280,7 @@ export function createServer(vaultPath) {
 
       case 'patch-note': {
         const { path: notePath, old_string: oldString, new_string: newString, replaceAll = false } = args;
-        const result = await patchNote(vaultPath, notePath, oldString, newString, replaceAll);
+        const result = await executeWithFallback('patch-note', 'patchNote', [vaultPath, notePath, oldString, newString, replaceAll]);
 
         const description = `Patched ${notePath}: ${result.totalReplacements} replacement(s) at line(s) ${result.changedLines.join(', ')}`;
 
@@ -275,7 +294,7 @@ export function createServer(vaultPath) {
 
       case 'toggle-checkbox': {
         const { path: notePath, text, checked } = args;
-        const result = await toggleCheckbox(vaultPath, notePath, text, checked);
+        const result = await executeWithFallback('toggle-checkbox', 'toggleCheckbox', [vaultPath, notePath, text, checked]);
 
         const state = checked ? 'checked' : 'unchecked';
         const description = `Toggled checkbox to ${state} at line ${result.line} in ${notePath}`;
@@ -285,6 +304,95 @@ export function createServer(vaultPath) {
           line: result.line
         });
 
+        return structuredResponse(result, description, metadata);
+      }
+
+      // --- CLI-only tools (available when Obsidian CLI is detected) ---
+
+      case 'get-backlinks': {
+        const { path: notePath } = args;
+        const result = await getBacklinks(vaultPath, notePath);
+        const description = result.count === 0
+          ? `No backlinks found for ${notePath}`
+          : `Found ${result.count} backlinks for ${notePath}`;
+        const metadata = createMetadata(startTime, { tool: 'get-backlinks' });
+        return structuredResponse(result, description, metadata);
+      }
+
+      case 'get-orphans': {
+        const result = await getOrphans(vaultPath);
+        const description = result.count === 0
+          ? 'No orphan notes found'
+          : `Found ${result.count} orphan notes (no incoming links)`;
+        const metadata = createMetadata(startTime, { tool: 'get-orphans' });
+        return structuredResponse(result, description, metadata);
+      }
+
+      case 'get-deadends': {
+        const result = await getDeadends(vaultPath);
+        const description = result.count === 0
+          ? 'No dead-end notes found'
+          : `Found ${result.count} dead-end notes (no outgoing links)`;
+        const metadata = createMetadata(startTime, { tool: 'get-deadends' });
+        return structuredResponse(result, description, metadata);
+      }
+
+      case 'daily-note': {
+        const result = await getDailyNote(vaultPath);
+        const description = result.exists
+          ? `Daily note: ${result.path}`
+          : `Daily note not yet created: ${result.path}`;
+        const metadata = createMetadata(startTime, { tool: 'daily-note' });
+        if (result.content !== null) {
+          return textResponse(result.content, metadata);
+        }
+        return structuredResponse(result, description, metadata);
+      }
+
+      case 'daily-append': {
+        const { content } = args;
+        const result = await appendToDailyNote(vaultPath, content);
+        const metadata = createMetadata(startTime, { tool: 'daily-append' });
+        return textResponse(`Appended to daily note: ${result.path}`, metadata);
+      }
+
+      case 'move-note': {
+        const { path: notePath, to } = args;
+        const result = await moveNote(vaultPath, notePath, to);
+        const metadata = createMetadata(startTime, { tool: 'move-note' });
+        return structuredResponse(result, `Moved ${result.oldPath} → ${result.newPath}`, metadata);
+      }
+
+      case 'rename-note': {
+        const { path: notePath, name: newName } = args;
+        const result = await renameNote(vaultPath, notePath, newName);
+        const metadata = createMetadata(startTime, { tool: 'rename-note' });
+        return structuredResponse(result, `Renamed ${result.oldPath} → ${result.newName}`, metadata);
+      }
+
+      case 'list-templates': {
+        const result = await listTemplates(vaultPath);
+        const description = result.count === 0
+          ? 'No templates found'
+          : `Found ${result.count} templates`;
+        const metadata = createMetadata(startTime, { tool: 'list-templates' });
+        return structuredResponse(result, description, metadata);
+      }
+
+      case 'read-template': {
+        const { name: templateName, resolve = false } = args;
+        const result = await readTemplate(vaultPath, templateName, resolve);
+        const metadata = createMetadata(startTime, { tool: 'read-template' });
+        return textResponse(result.content, metadata);
+      }
+
+      case 'list-tasks': {
+        const { done, todo, daily } = args;
+        const result = await listTasks(vaultPath, { done, todo, daily });
+        const description = result.count === 0
+          ? 'No tasks found'
+          : `Found ${result.count} tasks`;
+        const metadata = createMetadata(startTime, { tool: 'list-tasks' });
         return structuredResponse(result, description, metadata);
       }
 
