@@ -3,6 +3,7 @@ package indexer
 import (
 	"io/fs"
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -10,6 +11,28 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 )
+
+// ChangeKind classifies a FileEvent. Mirrors the proto enum but kept local
+// so the watcher package has no reverse dependency on proto/indexer/v1.
+// The service layer translates to pb.ChangeKind before sending on the wire.
+type ChangeKind int
+
+const (
+	ChangeUnspecified ChangeKind = iota
+	ChangeCreated
+	ChangeModified
+	ChangeDeleted
+	ChangeRenamed
+)
+
+// FileEvent is a per-subscriber notification emitted for every .md mutation
+// the watcher observes. Path is vault-relative using forward slashes so it
+// lines up with vault.ListMarkdown output across platforms.
+type FileEvent struct {
+	Kind      ChangeKind
+	Path      string
+	Timestamp time.Time
+}
 
 // Watcher tails the filesystem under a vault root and invalidates any
 // cached data the service holds for that vault. One Watcher per vault;
@@ -22,13 +45,16 @@ import (
 // several times for one logical change, which defeats the point of
 // caching.
 type Watcher struct {
-	Root   string // absolute vault root path
+	Root     string // absolute vault root path
 	OnChange func() // invoked (debounced) whenever vault contents change
 
 	fs      *fsnotify.Watcher
 	mu      sync.Mutex
 	pending *time.Timer
 	stop    chan struct{}
+
+	submu       sync.Mutex
+	subscribers []chan FileEvent
 }
 
 // newWatcher creates but does not start the watcher. Callers register
@@ -105,10 +131,19 @@ func (w *Watcher) loop() {
 			}
 			// A new directory is itself a watch target — add it
 			// before letting the debounce timer collapse the event.
+			// fsnotify gives absolute paths, so os.Stat is the right
+			// probe here; the earlier fs.Stat(dirFS{}, ...) hack was
+			// always failing because dirFS.Open always returns
+			// fs.ErrNotExist, which meant new subdirs were silently
+			// never added and subsequent .md writes under them never
+			// invalidated the cache.
 			if ev.Op&fsnotify.Create != 0 {
-				if info, err := fs.Stat(dirFS{}, ev.Name); err == nil && info.IsDir() {
+				if info, err := os.Stat(ev.Name); err == nil && info.IsDir() {
 					_ = w.fs.Add(ev.Name)
 				}
+			}
+			if kind, ok := classifyEvent(ev); ok {
+				w.broadcast(kind, ev.Name)
 			}
 			w.schedule(debounce)
 		case err, ok := <-w.fs.Errors:
@@ -150,10 +185,82 @@ func relevant(ev fsnotify.Event) bool {
 	return strings.HasSuffix(ev.Name, ".md")
 }
 
-// dirFS is a tiny adapter so we can call fs.Stat on absolute paths
-// without pulling in os.Stat (which would pick up a symlink vs a
-// directory inconsistently here). The stdlib's fs.Stat takes an fs.FS;
-// we give it one that just forwards to the os.
-type dirFS struct{}
+// classifyEvent maps a raw fsnotify event into a ChangeKind suitable for
+// subscriber delivery. Only .md files produce a kind — directory and
+// non-markdown events are swallowed here because subscribers are listening
+// for note-level changes, not inode-level noise.
+func classifyEvent(ev fsnotify.Event) (ChangeKind, bool) {
+	if !strings.HasSuffix(ev.Name, ".md") {
+		return ChangeUnspecified, false
+	}
+	switch {
+	case ev.Op&fsnotify.Create != 0:
+		return ChangeCreated, true
+	case ev.Op&fsnotify.Write != 0:
+		return ChangeModified, true
+	case ev.Op&fsnotify.Remove != 0:
+		return ChangeDeleted, true
+	case ev.Op&fsnotify.Rename != 0:
+		return ChangeRenamed, true
+	}
+	return ChangeUnspecified, false
+}
 
-func (dirFS) Open(name string) (fs.File, error) { return nil, fs.ErrNotExist }
+// Subscribe registers a new listener and returns its event channel. Buffer
+// controls how many events can queue before the watcher drops new ones for
+// this subscriber — a slow consumer should not be able to stall the event
+// loop. Pass buf<=0 to accept the default (64).
+//
+// The caller MUST invoke Unsubscribe with the returned channel to release
+// resources; the channel is closed at that point so range-loops terminate
+// naturally.
+func (w *Watcher) Subscribe(buf int) chan FileEvent {
+	if buf <= 0 {
+		buf = 64
+	}
+	ch := make(chan FileEvent, buf)
+	w.submu.Lock()
+	w.subscribers = append(w.subscribers, ch)
+	w.submu.Unlock()
+	return ch
+}
+
+// Unsubscribe removes target from the subscriber set and closes it. Safe
+// to call from any goroutine; silently no-ops if target isn't subscribed
+// (e.g. already unsubscribed).
+func (w *Watcher) Unsubscribe(target chan FileEvent) {
+	w.submu.Lock()
+	defer w.submu.Unlock()
+	for i, s := range w.subscribers {
+		if s == target {
+			w.subscribers = append(w.subscribers[:i], w.subscribers[i+1:]...)
+			close(target)
+			return
+		}
+	}
+}
+
+// broadcast fans an event out to every subscriber. Non-blocking sends: a
+// subscriber with a full buffer misses this event rather than blocking the
+// watcher's event loop. We hold submu across the whole fan-out so
+// Unsubscribe (which closes the channel) cannot race with a send.
+func (w *Watcher) broadcast(kind ChangeKind, absPath string) {
+	rel, err := filepath.Rel(w.Root, absPath)
+	if err != nil {
+		return
+	}
+	ev := FileEvent{
+		Kind:      kind,
+		Path:      filepath.ToSlash(rel),
+		Timestamp: time.Now(),
+	}
+	w.submu.Lock()
+	defer w.submu.Unlock()
+	for _, ch := range w.subscribers {
+		select {
+		case ch <- ev:
+		default:
+			// Slow subscriber: drop rather than stall the loop.
+		}
+	}
+}

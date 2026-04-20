@@ -4,8 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 )
+
+// dailyNotFoundRe matches the diagnostic patterns the Obsidian CLI emits
+// when today's daily note hasn't been created yet. Anything else (auth,
+// vault selection, CLI bug) must propagate to the caller so a real
+// failure is not reported back as Exists=false.
+var dailyNotFoundRe = regexp.MustCompile(`(?i)not found|does not exist|no such (file|note)|has not been created|hasn't been created`)
 
 // Backlink is one note that links to the queried file.
 type Backlink struct {
@@ -102,8 +109,11 @@ type DailyNote struct {
 }
 
 // GetDailyNote reads today's daily note. `daily:read` returns the body or
-// errors when the note doesn't exist yet; we suppress that error and mark
-// Exists=false so clients can decide whether to create it.
+// errors when the note doesn't exist yet; we suppress only the "not found"
+// class of errors (marking Exists=false so clients can decide whether to
+// create it). Everything else — permission denied, wrong vault, CLI bugs —
+// propagates, because silently returning Exists=false for a real failure
+// turns a loud error into a misdiagnosed empty note.
 func (e *Executor) GetDailyNote(ctx context.Context) (DailyNote, error) {
 	pathRes, err := e.Exec(ctx, "daily:path", nil)
 	if err != nil {
@@ -112,7 +122,10 @@ func (e *Executor) GetDailyNote(ctx context.Context) (DailyNote, error) {
 	path := strings.TrimSpace(pathRes.Stdout)
 	readRes, err := e.Exec(ctx, "daily:read", nil)
 	if err != nil {
-		return DailyNote{Path: path, Exists: false}, nil
+		if dailyNotFoundRe.MatchString(err.Error()) {
+			return DailyNote{Path: path, Exists: false}, nil
+		}
+		return DailyNote{}, err
 	}
 	return DailyNote{Path: path, Content: readRes.Stdout, Exists: true}, nil
 }

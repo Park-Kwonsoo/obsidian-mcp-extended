@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	"obsidian-mcp/internal/metadata"
 	"obsidian-mcp/internal/search"
@@ -286,6 +287,99 @@ func (s *Server) SearchByTags(_ context.Context, req *pb.SearchByTagsRequest) (*
 		notes[i] = &pb.TagHit{Path: n.Path, Tags: n.Tags}
 	}
 	return &pb.SearchByTagsResponse{Notes: notes, Count: int32(res.Count)}, nil
+}
+
+// ─── SubscribeFileChanges ────────────────────────────────────────────
+
+// SubscribeFileChanges streams per-file mutation events for one vault.
+// If req.InitialSnapshot is set the daemon first replays a CREATED event
+// per existing .md (so a fresh client reaches steady state without an
+// extra ListNotes round-trip) and then tails the live watcher until the
+// client cancels or the server shuts down.
+//
+// Requires the vault's watcher to have started successfully; if the
+// watcher failed to come up (rare — usually a kqueue/inotify exhaustion)
+// we return an error so the client can fall back rather than hang on an
+// event stream that will never produce anything.
+func (s *Server) SubscribeFileChanges(req *pb.SubscribeFileChangesRequest, stream pb.IndexerService_SubscribeFileChangesServer) error {
+	rec, err := s.getVault(req.GetVaultPath())
+	if err != nil {
+		return err
+	}
+	if rec.watcher == nil {
+		return errors.New("file-change watcher unavailable for vault")
+	}
+
+	ctx := stream.Context()
+
+	if req.GetInitialSnapshot() {
+		notes, err := rec.listMarkdown("")
+		if err != nil {
+			return err
+		}
+		now := time.Now().UnixMilli()
+		for _, p := range notes {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := stream.Send(&pb.SubscribeFileChangesResponse{
+				Event: &pb.FileChangeEvent{
+					Kind:        pb.ChangeKind_CHANGE_KIND_CREATED,
+					Path:        p,
+					TimestampMs: now,
+				},
+			}); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Subscribe after the snapshot so steady-state begins exactly where
+	// the snapshot ended. A small race remains (changes during the
+	// snapshot that neither land in the snapshot list nor arrive on the
+	// subscription); clients that care can ListNotes again after the
+	// first live event settles. The alternative — subscribing first and
+	// buffering — traps the daemon into holding arbitrarily many events
+	// while the snapshot streams.
+	ch := rec.watcher.Subscribe(0)
+	defer rec.watcher.Unsubscribe(ch)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case ev, ok := <-ch:
+			if !ok {
+				return nil // watcher closed (daemon shutdown)
+			}
+			if err := stream.Send(&pb.SubscribeFileChangesResponse{
+				Event: &pb.FileChangeEvent{
+					Kind:        toPBChangeKind(ev.Kind),
+					Path:        ev.Path,
+					TimestampMs: ev.Timestamp.UnixMilli(),
+				},
+			}); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+// toPBChangeKind translates the watcher's internal enum into the wire
+// enum. Kept as a function rather than a map so an unknown source value
+// maps to CHANGE_KIND_UNSPECIFIED explicitly.
+func toPBChangeKind(k ChangeKind) pb.ChangeKind {
+	switch k {
+	case ChangeCreated:
+		return pb.ChangeKind_CHANGE_KIND_CREATED
+	case ChangeModified:
+		return pb.ChangeKind_CHANGE_KIND_MODIFIED
+	case ChangeDeleted:
+		return pb.ChangeKind_CHANGE_KIND_DELETED
+	case ChangeRenamed:
+		return pb.ChangeKind_CHANGE_KIND_RENAMED
+	}
+	return pb.ChangeKind_CHANGE_KIND_UNSPECIFIED
 }
 
 // ─── paginate ────────────────────────────────────────────────────────

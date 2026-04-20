@@ -140,13 +140,20 @@ func (e *Executor) ResolveVaultName(ctx context.Context) string {
 	out, err := exec.CommandContext(cctx, e.binary(), "vaults").Output()
 	if err == nil {
 		for _, line := range strings.Split(string(out), "\n") {
-			if strings.Contains(line, e.VaultPath) {
-				// vault list format: "<name>  <path>" or "<name>\t<path>"
-				fields := strings.Fields(line)
-				if len(fields) >= 1 {
-					e.vaultName = fields[0]
-					return e.vaultName
-				}
+			// vault list format: "<name>  <path>" or "<name>\t<path>".
+			// `strings.Fields` would split a vault name containing spaces
+			// ("My Vault") and leave us with a truncated "My", which then
+			// gets passed to every CLI call as vault=<wrong name>. Peel
+			// the path off the end instead so names with any whitespace
+			// inside survive intact.
+			trimmed := strings.TrimRight(line, " \t\r\n")
+			if !strings.HasSuffix(trimmed, e.VaultPath) {
+				continue
+			}
+			name := strings.TrimSpace(trimmed[:len(trimmed)-len(e.VaultPath)])
+			if name != "" {
+				e.vaultName = name
+				return e.vaultName
 			}
 		}
 	}
