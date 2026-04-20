@@ -116,6 +116,12 @@ export function createServer(vaultPath, options = {}) {
           description += `\n(Use limit=${limit}, offset=${nextOffset} to get next page)`;
         }
 
+        if (result.results && result.results.length > 0) {
+          description += '\n\n' + result.results
+            .map(r => `- ${r.file}: ${r.title}${r.line ? ` (line ${r.line})` : ''}`)
+            .join('\n');
+        }
+
         const metadata = createMetadata(startTime, {
           tool: 'search-by-title',
           filesSearched: result.filesSearched || 0
@@ -135,6 +141,10 @@ export function createServer(vaultPath, options = {}) {
         if (result.pagination.hasMore) {
           const nextOffset = offset + limit;
           description += `\n(Use limit=${limit}, offset=${nextOffset} to get next page)`;
+        }
+
+        if (result.notes && result.notes.length > 0) {
+          description += '\n\n' + result.notes.map(p => `- ${p}`).join('\n');
         }
 
         const metadata = createMetadata(startTime, { tool: 'list-notes' });
@@ -178,9 +188,15 @@ export function createServer(vaultPath, options = {}) {
         const result = await executeWithFallback('search-by-tags', 'searchByTags', [vaultPath, tags, directory, caseSensitive]);
 
         const tagList = tags.join(', ');
-        const description = result.count === 0
+        let description = result.count === 0
           ? `No notes found with tags: ${tagList}`
           : `Found ${result.count} notes with tags: ${tagList}`;
+
+        if (result.notes && result.notes.length > 0) {
+          description += '\n\n' + result.notes
+            .map(n => `- ${n.path}${n.tags && n.tags.length > 0 ? ` [${n.tags.join(', ')}]` : ''}`)
+            .join('\n');
+        }
 
         const metadata = createMetadata(startTime, {
           tool: 'search-by-tags',
@@ -209,6 +225,12 @@ export function createServer(vaultPath, options = {}) {
           if (result.pagination.hasMore) {
             const nextOffset = offset + limit;
             description += `\n(Use limit=${limit}, offset=${nextOffset} to get next page)`;
+          }
+
+          if (result.notes && result.notes.length > 0) {
+            description += '\n\n' + result.notes
+              .map(n => `- ${n.path}${n.title ? `: ${n.title}` : ''}`)
+              .join('\n');
           }
         } else {
           description = `Retrieved metadata for: ${notePath}`;
@@ -312,27 +334,36 @@ export function createServer(vaultPath, options = {}) {
       case 'get-backlinks': {
         const { path: notePath } = args;
         const result = await getBacklinks(vaultPath, notePath);
-        const description = result.count === 0
+        let description = result.count === 0
           ? `No backlinks found for ${notePath}`
           : `Found ${result.count} backlinks for ${notePath}`;
+        if (result.backlinks && result.backlinks.length > 0) {
+          description += '\n\n' + result.backlinks.map(b => `- ${b.path}`).join('\n');
+        }
         const metadata = createMetadata(startTime, { tool: 'get-backlinks' });
         return structuredResponse(result, description, metadata);
       }
 
       case 'get-orphans': {
         const result = await getOrphans(vaultPath);
-        const description = result.count === 0
+        let description = result.count === 0
           ? 'No orphan notes found'
           : `Found ${result.count} orphan notes (no incoming links)`;
+        if (result.orphans && result.orphans.length > 0) {
+          description += '\n\n' + result.orphans.map(o => `- ${o.path}`).join('\n');
+        }
         const metadata = createMetadata(startTime, { tool: 'get-orphans' });
         return structuredResponse(result, description, metadata);
       }
 
       case 'get-deadends': {
         const result = await getDeadends(vaultPath);
-        const description = result.count === 0
+        let description = result.count === 0
           ? 'No dead-end notes found'
           : `Found ${result.count} dead-end notes (no outgoing links)`;
+        if (result.deadends && result.deadends.length > 0) {
+          description += '\n\n' + result.deadends.map(d => `- ${d.path}`).join('\n');
+        }
         const metadata = createMetadata(startTime, { tool: 'get-deadends' });
         return structuredResponse(result, description, metadata);
       }

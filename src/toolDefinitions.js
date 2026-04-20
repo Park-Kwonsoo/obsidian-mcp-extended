@@ -116,7 +116,7 @@ const baseToolDefinitions = [
                           description: 'Matching line with search terms highlighted using **'
                         }
                       },
-                      required: ['lines', 'highlighted']
+                      required: ['highlighted']
                     }
                   },
                   required: ['line', 'content']

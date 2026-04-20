@@ -52,7 +52,7 @@ function parseSearchOutput(stdout, vaultPath) {
 
   const result = [];
   for (const [filePath, matches] of Object.entries(files)) {
-    result.push({ path: filePath, matches });
+    result.push({ path: filePath, matchCount: matches.length, matches });
   }
   return result;
 }
