@@ -19,50 +19,106 @@ import (
 	pb "obsidian-mcp/proto/indexer/v1"
 )
 
-// Server implements pb.IndexerServiceServer. It holds a Vault per
-// absolute vault_path so different MCP clients can address different
-// vaults through the same daemon. A future warm index will attach here.
+// Server implements pb.IndexerServiceServer. It holds one per-vault
+// record keyed by absolute path; each record owns the vault handle, a
+// filesystem watcher, and a cached note listing the watcher invalidates.
+// Multiple MCP clients pointing at different vaults route through the
+// same daemon.
 type Server struct {
 	pb.UnimplementedIndexerServiceServer
 
 	mu     sync.Mutex
-	vaults map[string]*vault.Vault
+	vaults map[string]*vaultRecord
+}
+
+// vaultRecord bundles the warm state for one vault. Every field beyond
+// `v` is protected by rmu so a list-notes RPC and an incoming fsnotify
+// event can't race each other.
+type vaultRecord struct {
+	v       *vault.Vault
+	watcher *Watcher
+
+	rmu        sync.RWMutex
+	listCache  []string // nil until the first ListNotes populates it
 }
 
 // NewServer returns a bare daemon ready to accept RPCs. Vaults are
 // opened lazily on first use of each vault_path; callers don't need to
 // register vaults in advance.
 func NewServer() *Server {
-	return &Server{vaults: map[string]*vault.Vault{}}
+	return &Server{vaults: map[string]*vaultRecord{}}
 }
 
-// getVault opens and caches a vault by absolute path. The cache means a
-// hot vault avoids repeated dir-exists probes per RPC.
-func (s *Server) getVault(root string) (*vault.Vault, error) {
+// getVault opens (on first use) and returns the vaultRecord for root.
+// The watcher is started the same time as the vault handle so cached
+// state becomes invalid the instant the user touches a file — no stale
+// list-notes responses after a write.
+func (s *Server) getVault(root string) (*vaultRecord, error) {
 	if root == "" {
 		return nil, errors.New("vault_path required")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if v, ok := s.vaults[root]; ok {
-		return v, nil
+	if rec, ok := s.vaults[root]; ok {
+		return rec, nil
 	}
 	v, err := vault.Open(root)
 	if err != nil {
 		return nil, err
 	}
-	s.vaults[root] = v
-	return v, nil
+	rec := &vaultRecord{v: v}
+	w, err := newWatcher(v.Root, rec.invalidate)
+	if err == nil {
+		if err := w.Start(); err == nil {
+			rec.watcher = w
+		}
+	}
+	// Watcher failure isn't fatal — the cache just behaves as a
+	// no-op cache (every RPC re-reads). Record the vault either way.
+	s.vaults[root] = rec
+	return rec, nil
+}
+
+// invalidate is the watcher's OnChange callback. It drops any per-vault
+// caches; the next RPC that needs them rebuilds from disk.
+func (r *vaultRecord) invalidate() {
+	r.rmu.Lock()
+	r.listCache = nil
+	r.rmu.Unlock()
+}
+
+// listMarkdown returns the cached note list, rebuilding on a miss.
+// Called by the ListNotes RPC — giving it warm-cache semantics without
+// changing the wire. subdir support intentionally bypasses the cache
+// (a subdir filter is rare enough not to justify multiple cache slots).
+func (r *vaultRecord) listMarkdown(subdir string) ([]string, error) {
+	if subdir != "" {
+		return r.v.ListMarkdown(subdir)
+	}
+	r.rmu.RLock()
+	cached := r.listCache
+	r.rmu.RUnlock()
+	if cached != nil {
+		return cached, nil
+	}
+	fresh, err := r.v.ListMarkdown("")
+	if err != nil {
+		return nil, err
+	}
+	r.rmu.Lock()
+	r.listCache = fresh
+	r.rmu.Unlock()
+	return fresh, nil
 }
 
 // ─── ListNotes ───────────────────────────────────────────────────────
 
 func (s *Server) ListNotes(_ context.Context, req *pb.ListNotesRequest) (*pb.ListNotesResponse, error) {
-	v, err := s.getVault(req.GetVaultPath())
+	rec, err := s.getVault(req.GetVaultPath())
 	if err != nil {
 		return nil, err
 	}
-	all, err := v.ListMarkdown(req.GetSubdir())
+	all, err := rec.listMarkdown(req.GetSubdir())
 	if err != nil {
 		return nil, err
 	}
@@ -81,11 +137,11 @@ func (s *Server) ListNotes(_ context.Context, req *pb.ListNotesRequest) (*pb.Lis
 // ─── ReadNote ────────────────────────────────────────────────────────
 
 func (s *Server) ReadNote(_ context.Context, req *pb.ReadNoteRequest) (*pb.ReadNoteResponse, error) {
-	v, err := s.getVault(req.GetVaultPath())
+	rec, err := s.getVault(req.GetVaultPath())
 	if err != nil {
 		return nil, err
 	}
-	content, rel, err := v.ReadNote(req.GetPath())
+	content, rel, err := rec.v.ReadNote(req.GetPath())
 	if err != nil {
 		var amb *vault.ErrAmbiguous
 		if errors.As(err, &amb) {
@@ -99,11 +155,11 @@ func (s *Server) ReadNote(_ context.Context, req *pb.ReadNoteRequest) (*pb.ReadN
 // ─── WriteNote ───────────────────────────────────────────────────────
 
 func (s *Server) WriteNote(_ context.Context, req *pb.WriteNoteRequest) (*pb.WriteNoteResponse, error) {
-	v, err := s.getVault(req.GetVaultPath())
+	rec, err := s.getVault(req.GetVaultPath())
 	if err != nil {
 		return nil, err
 	}
-	rel, err := v.WriteNote(req.GetPath(), req.GetContent())
+	rel, err := rec.v.WriteNote(req.GetPath(), req.GetContent())
 	if err != nil {
 		return nil, err
 	}
@@ -116,11 +172,11 @@ func (s *Server) WriteNote(_ context.Context, req *pb.WriteNoteRequest) (*pb.Wri
 // ─── DeleteNote ──────────────────────────────────────────────────────
 
 func (s *Server) DeleteNote(_ context.Context, req *pb.DeleteNoteRequest) (*pb.DeleteNoteResponse, error) {
-	v, err := s.getVault(req.GetVaultPath())
+	rec, err := s.getVault(req.GetVaultPath())
 	if err != nil {
 		return nil, err
 	}
-	if err := v.DeleteNote(req.GetPath()); err != nil {
+	if err := rec.v.DeleteNote(req.GetPath()); err != nil {
 		return nil, err
 	}
 	return &pb.DeleteNoteResponse{DeletedPath: req.GetPath()}, nil
@@ -129,11 +185,11 @@ func (s *Server) DeleteNote(_ context.Context, req *pb.DeleteNoteRequest) (*pb.D
 // ─── SearchByTitle ───────────────────────────────────────────────────
 
 func (s *Server) SearchByTitle(_ context.Context, req *pb.SearchByTitleRequest) (*pb.SearchByTitleResponse, error) {
-	v, err := s.getVault(req.GetVaultPath())
+	rec, err := s.getVault(req.GetVaultPath())
 	if err != nil {
 		return nil, err
 	}
-	res, err := search.SearchByTitle(v, req.GetQuery(), req.GetSubdir(), req.GetCaseSensitive())
+	res, err := search.SearchByTitle(rec.v, req.GetQuery(), req.GetSubdir(), req.GetCaseSensitive())
 	if err != nil {
 		return nil, err
 	}
@@ -163,11 +219,11 @@ func (s *Server) SearchByTitle(_ context.Context, req *pb.SearchByTitleRequest) 
 // ─── SearchVault ─────────────────────────────────────────────────────
 
 func (s *Server) SearchVault(_ context.Context, req *pb.SearchVaultRequest) (*pb.SearchVaultResponse, error) {
-	v, err := s.getVault(req.GetVaultPath())
+	rec, err := s.getVault(req.GetVaultPath())
 	if err != nil {
 		return nil, err
 	}
-	res, err := search.SearchVault(v, req.GetQuery(), search.VaultOpts{
+	res, err := search.SearchVault(rec.v, req.GetQuery(), search.VaultOpts{
 		CaseSensitive:  req.GetCaseSensitive(),
 		IncludeContext: req.GetIncludeContext(),
 		ContextLines:   int(req.GetContextLines()),
@@ -217,11 +273,11 @@ func (s *Server) SearchVault(_ context.Context, req *pb.SearchVaultRequest) (*pb
 // ─── SearchByTags ────────────────────────────────────────────────────
 
 func (s *Server) SearchByTags(_ context.Context, req *pb.SearchByTagsRequest) (*pb.SearchByTagsResponse, error) {
-	v, err := s.getVault(req.GetVaultPath())
+	rec, err := s.getVault(req.GetVaultPath())
 	if err != nil {
 		return nil, err
 	}
-	res, err := search.SearchByTags(v, req.GetTags(), req.GetSubdir(), req.GetCaseSensitive())
+	res, err := search.SearchByTags(rec.v, req.GetTags(), req.GetSubdir(), req.GetCaseSensitive())
 	if err != nil {
 		return nil, err
 	}

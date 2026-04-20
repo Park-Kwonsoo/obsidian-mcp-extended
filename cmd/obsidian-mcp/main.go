@@ -19,6 +19,7 @@ import (
 	"obsidian-mcp/internal/obscli"
 	"obsidian-mcp/internal/search"
 	"obsidian-mcp/internal/vault"
+	pb "obsidian-mcp/proto/indexer/v1"
 )
 
 // version is stamped at build time via -ldflags "-X main.version=..." from
@@ -172,8 +173,20 @@ func paginate(total, limit, offset int) (int, int, pagination) {
 
 // ─── Tool handlers ────────────────────────────────────────────────────
 
-func handleListNotes(v *vault.Vault) func(context.Context, *mcp.CallToolRequest, listNotesArgs) (*mcp.CallToolResult, any, error) {
-	return func(_ context.Context, _ *mcp.CallToolRequest, args listNotesArgs) (*mcp.CallToolResult, any, error) {
+func handleListNotes(v *vault.Vault, daemon pb.IndexerServiceClient) func(context.Context, *mcp.CallToolRequest, listNotesArgs) (*mcp.CallToolResult, any, error) {
+	return func(ctx context.Context, _ *mcp.CallToolRequest, args listNotesArgs) (*mcp.CallToolResult, any, error) {
+		// Daemon path first. `list-notes` is the top beneficiary of the
+		// warm cache — on a 10k-note vault it's the difference between a
+		// full directory walk and a map lookup.
+		if daemon != nil {
+			if notes, pg, err := daemonListNotes(ctx, daemon, v.Root, args); err == nil {
+				return toolResult(
+					fmt.Sprintf("Found %d notes (returned %d)", pg.Total, pg.Returned),
+					map[string]any{"notes": notes, "count": pg.Returned, "pagination": pg},
+				)
+			}
+			// Fall through to in-process on any daemon error.
+		}
 		all, err := v.ListMarkdown(args.Directory)
 		if err != nil {
 			return nil, nil, err
@@ -185,6 +198,29 @@ func handleListNotes(v *vault.Vault) func(context.Context, *mcp.CallToolRequest,
 			map[string]any{"notes": slice, "count": pg.Returned, "pagination": pg},
 		)
 	}
+}
+
+// daemonListNotes is the gRPC path for list-notes. Returns the notes slice
+// and the same pagination shape the in-process handler produces so the
+// caller's response formatting is identical either way.
+func daemonListNotes(ctx context.Context, c pb.IndexerServiceClient, vaultRoot string, args listNotesArgs) ([]string, pagination, error) {
+	resp, err := c.ListNotes(ctx, &pb.ListNotesRequest{
+		VaultPath: vaultRoot,
+		Subdir:    args.Directory,
+		Limit:     int32(args.Limit),
+		Offset:    int32(args.Offset),
+	})
+	if err != nil {
+		return nil, pagination{}, err
+	}
+	pg := resp.GetPagination()
+	return resp.GetNotes(), pagination{
+		Total:    int(pg.GetTotal()),
+		Returned: int(pg.GetReturned()),
+		Limit:    int(pg.GetLimit()),
+		Offset:   int(pg.GetOffset()),
+		HasMore:  pg.GetHasMore(),
+	}, nil
 }
 
 func handleReadNote(v *vault.Vault) func(context.Context, *mcp.CallToolRequest, readNoteArgs) (*mcp.CallToolResult, any, error) {
@@ -361,10 +397,12 @@ func main() {
 		Version: version,
 	}, nil)
 
+	daemon := dialDaemon()
+
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list-notes",
 		Description: "List markdown files in the vault or a subdirectory.",
-	}, handleListNotes(v))
+	}, handleListNotes(v, daemon))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "read-note",
