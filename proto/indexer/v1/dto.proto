@@ -18,7 +18,7 @@ option go_package = "obsidian-mcp/proto/indexer/v1;indexerpb";
 message ListNotesRequest {
   string vault_path = 1; // absolute path, required
   string subdir = 2; // vault-relative; "" = whole vault
-  int32 limit = 3; // 0 → server default (실100)
+  int32 limit = 3; // 0 → server default (100)
   int32 offset = 4;
 }
 

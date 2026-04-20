@@ -16,6 +16,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"obsidian-mcp/internal/config"
+	"obsidian-mcp/internal/obscli"
 	"obsidian-mcp/internal/search"
 	"obsidian-mcp/internal/vault"
 )
@@ -395,7 +396,16 @@ func main() {
 		Description: "Find notes that contain ALL requested tags (frontmatter or inline). Leading # is optional.",
 	}, handleSearchByTags(v))
 
-	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
+	// Group B tools (CLI-backed) register only when `obsidian` is reachable.
+	// That keeps the tools/list surface honest: if the CLI isn't there, the
+	// tools that need it never get advertised.
+	ctx := context.Background()
+	cliExec := &obscli.Executor{Binary: cfg.ObsidianCLI, VaultPath: cfg.Vault}
+	if cliExec.Detect(ctx) {
+		registerCLITools(server, cliExec)
+	}
+
+	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
 }
