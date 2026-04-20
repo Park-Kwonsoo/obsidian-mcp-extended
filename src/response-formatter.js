@@ -82,6 +82,26 @@ export function createMetadata(startTime, additional = {}) {
 }
 
 /**
+ * Appends a bulleted preview of items to an existing description.
+ * Truncates at `maxPreview` and appends a `... and N more` tail so `content[].text`
+ * stays useful for LLM clients without exploding token usage when a caller
+ * requests a large page. Full data still travels via structuredContent.
+ * @param {string} description - Existing description
+ * @param {Array} items - Items to render; no-op when falsy or empty
+ * @param {(item: any) => string} formatter - Per-item renderer
+ * @param {number} [maxPreview=50] - Max items shown before truncation tail
+ * @returns {string} New description
+ */
+export function appendItemList(description, items, formatter, maxPreview = 50) {
+  if (!items || items.length === 0) return description;
+  const shown = items.slice(0, maxPreview).map(formatter).join('\n');
+  const tail = items.length > maxPreview
+    ? `\n... and ${items.length - maxPreview} more`
+    : '';
+  return description + '\n\n' + shown + tail;
+}
+
+/**
  * Strips verbose context data from search results to reduce token usage
  * Removes context.lines arrays while keeping essential match information
  * @param {object} searchResults - The search results object
