@@ -68,8 +68,9 @@ func main() {
 		log.Fatalf("chmod socket: %v", err)
 	}
 
+	indexerSrv := indexer.NewServer()
 	srv := grpc.NewServer()
-	pb.RegisterIndexerServiceServer(srv, indexer.NewServer())
+	pb.RegisterIndexerServiceServer(srv, indexerSrv)
 	log.Printf("obsidian-indexerd %s listening on %s", version, *socketPath)
 
 	go func() {
@@ -85,6 +86,19 @@ func main() {
 	<-ctx.Done()
 
 	log.Println("shutting down")
-	srv.GracefulStop()
+	// GracefulStop blocks until every in-flight RPC returns. Streaming
+	// RPCs like SubscribeFileChanges park on their watcher's subscriber
+	// channel and only exit when that channel closes — so run
+	// GracefulStop (which immediately stops accepting new RPCs)
+	// concurrently with indexerSrv.Close(), which closes every watcher
+	// and unblocks those streams. Without this wiring GracefulStop
+	// hangs forever whenever a subscriber is still attached.
+	stopped := make(chan struct{})
+	go func() {
+		srv.GracefulStop()
+		close(stopped)
+	}()
+	_ = indexerSrv.Close()
+	<-stopped
 	_ = os.Remove(*socketPath)
 }
