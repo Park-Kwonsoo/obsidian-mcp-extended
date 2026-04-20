@@ -1,0 +1,16 @@
+{
+  "tool": "search-by-tags",
+  "args": {
+    "tags": [
+      "moc"
+    ],
+    "caseSensitive": false
+  },
+  "paths": [
+    "_mocs/note-00014.md",
+    "_mocs/note-00035.md",
+    "_mocs/note-00081.md",
+    "_mocs/note-00094.md"
+  ],
+  "count": 4
+}

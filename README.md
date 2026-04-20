@@ -1,293 +1,168 @@
-# Obsidian MCP Server
+# obsidian-mcp
 
-[![Tests](https://github.com/Piotr1215/mcp-obsidian/actions/workflows/test.yml/badge.svg)](https://github.com/Piotr1215/mcp-obsidian/actions/workflows/test.yml)
-[![codecov](https://codecov.io/gh/Piotr1215/mcp-obsidian/graph/badge.svg)](https://codecov.io/gh/Piotr1215/mcp-obsidian)
-[![MCP Compliant](https://img.shields.io/badge/MCP-Compliant-green)](./MCP_SPEC_COMPLIANCE.md)
+A Go-native Model Context Protocol (MCP) server for Obsidian. Talks to MCP
+clients (Claude Desktop, Claude Code, …) over stdio JSON-RPC, reads vault
+files directly from disk, and shells out to the `obsidian` CLI only for tools
+whose semantics depend on a running Obsidian app (backlinks, daily notes,
+templates).
 
-MCP server for Obsidian that provides secure, direct file system access to vault files.
+The server is a single ~8 MB static binary with no runtime dependencies
+beyond an accessible vault directory.
 
-## Why This Server?
+## Why
 
-Most existing Obsidian MCP servers rely on the Obsidian REST API plugin, which requires:
-- Obsidian to be installed
-- Obsidian to be running
-- The REST API plugin to be configured
+Most Obsidian MCP servers rely on the Obsidian REST API plugin, which needs
+the Obsidian app running with a configured plugin for every request. This
+server operates on the vault files directly, so it also works with
+[obsidian.nvim](https://github.com/obsidian-nvim/obsidian.nvim) or any
+editor that treats the vault as a plain markdown tree.
 
-This server instead works directly with Obsidian vault files on disk, making it compatible with setups using [obsidian.nvim](https://github.com/obsidian-nvim/obsidian.nvim) - a Neovim plugin that provides Obsidian-like features without requiring the Obsidian app.
-
-## Features
-
-- **Direct file system access** to Obsidian vaults - no Obsidian app required
-- **Security-first design** with path traversal prevention and input validation
-- **High performance** with execution time tracking and resource limits
-- **Rich search capabilities** including regex support and tag-based search
-- **Metadata support** with frontmatter and inline tag parsing
-- **MCP Resources** for HATEOAS-style discovery and navigation
-
-## Recent Updates
-
-### 🎉 New Features
-- **🗺️ MOC Discovery**: New `discover-mocs` tool provides a high-level map of your vault's knowledge structure by discovering Maps of Content and their relationships. **Start here for 10x faster navigation!**
-- **Resource Links**: Search results now include MCP resource links for direct note access
-- **Context Snippets in Search Results**: Search results now include surrounding lines for better context understanding
-- **Match Highlighting**: Search terms are highlighted with **bold** markers in results
-- **Improved Search Result Structure**: Results are now grouped by file with match counts and snippets
-
-## Installation
+## Install
 
 ```bash
-npm install
+git clone <repo-url> obsidian-mcp
+cd obsidian-mcp
+make install   # builds and installs to $HOME/.local/bin/obsidian-mcp
 ```
 
-## Usage
-
-### Testing with MCP Inspector
+Or manually:
 
 ```bash
-# Replace /home/decoder/dev/obsidian/decoder with your vault path
-npx @modelcontextprotocol/inspector node src/index.js /home/decoder/dev/obsidian/decoder
+go build -o $HOME/.local/bin/obsidian-mcp ./cmd/obsidian-mcp
 ```
 
-The inspector will open at http://localhost:5173
+Make sure `$HOME/.local/bin` is on your `PATH`.
 
-### Running Tests
+## Register with Claude
 
 ```bash
-# Run all tests
-npm test
-
-# Run tests in watch mode
-npm run test:watch
-
-# Run tests with coverage report
-npm run test:coverage
-
-# Run tests with coverage and check thresholds
-npm run coverage
-
-# Run mutation testing (all files)
-npm run test:mutation
-
-# Run mutation testing (pagination code only - faster)
-npm run test:mutation-pagination
+claude mcp add obsidian -s user -- obsidian-mcp \
+  --vault ~/Documents/ObsidianVault \
+  --obsidian-cli "$(which obsidian)"
 ```
 
-### Adding to Claude Desktop
-
-To add this server to Claude Desktop, use the Claude CLI:
+Verify:
 
 ```bash
-# Clone this repository
-git clone https://github.com/Piotr1215/mcp-obsidian.git
-cd mcp-obsidian
-
-# Install dependencies
-npm install
-
-# Add to Claude (replace /path/to/your/vault with your Obsidian vault path)
-claude mcp add obsidian -s user -- node /path/to/mcp-obsidian/src/index.js /path/to/your/vault
+claude mcp list    # expect "obsidian" in the output
 ```
 
-For example, if you cloned the repo to `~/dev/mcp-obsidian` and your vault is at `~/Documents/ObsidianVault`:
+### Startup flags
+
+| Flag | Required | Purpose |
+|------|----------|---------|
+| `--vault` | yes | Absolute path to the Obsidian vault. The first positional argument is also accepted. |
+| `--obsidian-cli` | no | Explicit path to the `obsidian` CLI binary. Defaults to a `$PATH` lookup. Only consulted by Group B tools (P2+). |
+
+## Tools (P1)
+
+These Group A tools are implemented directly in Go — no Obsidian CLI
+required.
+
+| Tool | What it does |
+|------|--------------|
+| `list-notes` | List every `.md` in the vault, or a subdirectory, with pagination. |
+| `read-note` | Return a note's full content. Accepts an exact vault-relative path *or* a bare filename (Obsidian wikilink-style resolution). |
+| `write-note` | Atomically create or overwrite a note (tmp-file + rename). |
+| `delete-note` | Remove a note after path-traversal validation. |
+| `search-by-title` | Find notes whose H1 title contains a substring. |
+| `search-vault` | Full-text search with boolean `AND`/`OR`/`NOT`, quoted phrases, field scopes (`title:`, `tag:`, `content:`), and grouping with parentheses. Optional context snippets. |
+| `search-by-tags` | Find notes that contain all requested tags (intersection). Reads both YAML frontmatter (`tags: [...]` or YAML list) and inline `#tag` markers. |
+
+Group B tools that wrap the Obsidian CLI (`get-backlinks`, `get-orphans`,
+`get-deadends`, `daily-note`, `daily-append`, `move-note`, `list-templates`,
+`read-template`, `list-tasks`) are scheduled for P2. The remaining
+fs-native tools (`discover-mocs`, `read-section`, `patch-note`,
+`toggle-checkbox`, `get-note-metadata`) are scheduled for P3–P4. An
+optional long-lived indexer daemon with a gRPC control plane is planned for
+P5 — the proto is already frozen under `proto/indexer/v1/`.
+
+## Performance
+
+Methodology: `/usr/bin/time -l`-wrapped subprocess, 15 runs + 3 warmup each,
+cold-start per invocation. Fixture: 552-note copy of a real vault
+(`parkkwonsoo`). See `proto/indexer/v1/README.md` for the daemon rationale
+and scaling curve past 10 k notes.
+
+### Latency (real-559 vault, mean wall-clock)
+
+| Tool | JS reference (prior) | Go-native | Speedup |
+|------|---------------------:|----------:|--------:|
+| `list-notes` | 1088.5 ms | **9.5 ms** | **115×** |
+| `read-note` | 779.3 ms | **7.7 ms** | **101×** |
+| `search-by-title` | 867.6 ms | **28.3 ms** | **31×** |
+| `search-vault` | 1285.8 ms | **26 ms** | **50×** |
+| `search-by-tags` | 1046.9 ms | **70 ms** | **15×** |
+
+### Memory (RSS max, median across runs)
+
+| Backend | Memory |
+|---------|-------:|
+| Go-native binary | **7.8 MB** |
+| Obsidian CLI subprocess | 112.3 MB |
+| JS reference server | 112.7 MB |
+
+## Backend selection policy
+
+For every Group A tool, the backend was chosen empirically by benchmark:
+
+- **Go-native wins by ≥ 2×** → compiled in as the only path, no CLI fallback.
+- **CLI wins by ≥ 2×** → CLI first with Go-native fallback on CLI failure.
+- **Inconclusive (within 2×)** → Go-native by default to minimize runtime dependencies.
+
+All seven Group A tools cleared the Go-native threshold by 4.5–66× margin,
+so the released binary carries no Group A CLI path at all.
+
+### Pinned: `write-note` and `delete-note`
+
+These two are **always go-native**, even without a head-to-head benchmark:
+
+1. **Fork overhead dominates.** A single file write/delete is a sub-millisecond filesystem op. Spawning `obsidian` costs ~100 ms for Electron startup and IPC handshake — 100–1000× the underlying work. CLI cannot win in any realistic scenario.
+2. **Benchmark safety.** CLI mutating operations can only be exercised against an Obsidian-registered vault, which on development machines is the user's real iCloud-synced vault. Running write/delete benches there would mutate live notes. Verdict recorded as *go-native by construction*.
+
+### Group B (CLI-only, kept as subprocess)
+
+Tools whose semantics depend on Obsidian itself — link auto-update during
+rename/move, daily-note path resolution, template rendering — continue to
+shell out to the `obsidian` CLI. No fs equivalent exists.
+
+`rename-note` has been dropped: `move-note` is a full superset (Obsidian
+CLI's `rename` is semantically a `move` within the same directory).
+
+## Layout
+
+```
+.
+├── cmd/obsidian-mcp/        # stdio MCP server entry point
+├── internal/
+│   ├── config/              # runtime-tunable limits
+│   ├── security/            # path traversal, markdown ext, sanitize, size
+│   ├── vault/               # fs walk + wikilink resolver + read/write/delete
+│   ├── metadata/            # frontmatter tags, inline #tag, wikilinks, MOC
+│   └── search/              # boolean AST, context snippets, title/content/tag
+├── proto/indexer/v1/        # frozen gRPC contract for the P5 daemon
+├── testdata/golden/         # JS-captured regression baselines
+└── tests/golden/            # Go-vs-JS parity tests
+```
+
+## Development
 
 ```bash
-claude mcp add obsidian -s user -- node ~/dev/mcp-obsidian/src/index.js ~/Documents/ObsidianVault
+make install      # build + drop binary into ~/.local/bin/obsidian-mcp
+make test         # unit tests + golden regression
+make fmt          # gofmt + goimports
+go test ./...     # raw test entry point
 ```
 
-This will add the server to your Claude configuration file (typically `~/.claude.json` or `~/.config/Claude/claude_desktop_config.json`).
-
-To verify the installation:
+Golden regression runs against a synthesized 100-note fixture
+(`scripts/gen_synth_vault.py` in the bench workspace). To regenerate after
+an intentional behavior change:
 
 ```bash
-claude mcp list
+go test ./tests/golden -update
 ```
 
-You should see `obsidian` in the list of available MCP servers.
+## Status
 
-## Available Tools
-
-### search-vault
-Search for content across all notes in your vault.
-
-**Features:**
-- Boolean operators: AND, OR, NOT (also supports &&, ||, -)
-- Field specifiers: `title:term`, `content:term`, `tag:term`
-- Quoted phrases: `"exact phrase"`
-- Grouping with parentheses: `(term1 OR term2) AND term3`
-- Case-sensitive/insensitive search
-- **Context snippets**: See surrounding lines for each match
-- **Match highlighting**: Search terms are highlighted with **bold**
-- **Resource links**: Results include MCP resource links for direct note access
-- Returns grouped results by file with match counts
-- Optional path filtering
-
-**Context Options:**
-- `includeContext` (default: true) - Show surrounding lines
-- `contextLines` (default: 2) - Number of lines before/after match (0-10)
-
-**Examples:**
-- `readme AND install` - Find notes containing both words
-- `title:setup OR tag:documentation` - Find by title or tag
-- `"getting started" -deprecated` - Exact phrase, excluding deprecated
-- `(python OR javascript) AND tutorial` - Complex queries with grouping
-
-**Example Output with Context:**
-```json
-{
-  "files": [{
-    "path": "notes/dotfiles.md",
-    "matchCount": 3,
-    "matches": [{
-      "line": 42,
-      "content": "Managing my dotfiles with stow",
-      "context": {
-        "lines": [
-          { "number": 40, "text": "## Configuration Management", "isMatch": false },
-          { "number": 41, "text": "", "isMatch": false },
-          { "number": 42, "text": "Managing my dotfiles with stow", "isMatch": true },
-          { "number": 43, "text": "has simplified my setup process.", "isMatch": false },
-          { "number": 44, "text": "", "isMatch": false }
-        ],
-        "highlighted": "Managing my **dotfiles** with stow"
-      }
-    }]
-  }],
-  "totalMatches": 43,
-  "fileCount": 15
-}
-```
-
-### search-by-title
-Search for notes by their H1 title (# Title).
-- Fast title-based search
-- Case-sensitive/insensitive matching
-- Returns title, file path, and line number
-- **Resource links**: Results include MCP resource links for direct note access
-- Optional path filtering
-- Only matches H1 headings (single #)
-
-### list-notes
-List all markdown files in your vault or a specific directory.
-- Returns file paths and total count
-- **Resource links**: Results include MCP resource links for direct note access
-- Supports directory filtering
-
-### read-note
-Read the complete content of a specific note.
-- **Wikilink-style resolution**: Just provide the filename (e.g., `bitwarden-cli.md`) and the server finds it anywhere in the vault
-- Falls back to exact path if provided (e.g., `Notes/projects/bitwarden-cli.md`)
-- Reports ambiguity if multiple notes share the same filename
-- Path validation ensures security
-- File size limits prevent memory issues
-
-### write-note
-Create or update a note with new content.
-- Atomic writes for data integrity
-- Automatic directory creation
-- Content size validation
-
-### delete-note
-Delete a note from your vault.
-- Safe deletion with proper validation
-- Path security checks
-
-### search-by-tags
-Find notes containing specific tags.
-- Supports both YAML frontmatter and inline #tags
-- AND operation for multiple tags
-- **Resource links**: Results include MCP resource links for direct note access
-- Case-sensitive/insensitive matching
-
-### get-note-metadata
-Get metadata for one or all notes without reading full content.
-- Single note mode: Get metadata for a specific note
-- Batch mode: Get metadata for all notes in vault
-- Extracts frontmatter, title, tags, and content preview
-- **Resource links**: Results include MCP resource links for direct note access
-- Lightweight alternative to reading full notes
-- Useful for building note indexes or dashboards
-
-### discover-mocs
-**⭐ RECOMMENDED: Start here!** Discover MOCs (Maps of Content) to understand your vault's knowledge structure.
-
-[Maps of Content](https://notes.linkingyourthinking.com/Cards/MOCs+Overview) are organizational hub notes (tagged with `#moc`) that link to related content. They were pioneered by [Nick Milo](https://www.linkingyourthinking.com/) as a flexible alternative to rigid folder structures.
-
-**Features:**
-- Lists all MOCs in your vault with their linked notes
-- Shows MOC hierarchy (which MOCs link to other MOCs)
-- Displays full list of wikilinks from each MOC
-- **Provides a high-level map** of your vault's organization
-- **10x faster navigation** - understand structure before searching
-- Filter by MOC name or directory
-
-**Why use MOCs?**
-- **Context**: See what knowledge areas exist in your vault
-- **Scale**: Understand how developed each area is
-- **Relationships**: Discover how topics connect through MOC hierarchy
-- **Entry points**: Find the best starting point for exploration
-
-**Example Output:**
-```
-Found 10 MOCs
-
-📚 Vault Index (24 linked notes)
-   Path: 00-INDEX.md
-   Links: Work-MOC, AI-MOC, Development-MOC, DevOps-MOC, Tools-MOC, Personal-MOC, Homelab-MOC, MCP-Framework-MOC
-   🔗 Links to MOCs: Work-MOC, AI-MOC, Development-MOC, DevOps-MOC, Tools-MOC, Personal-MOC, Homelab-MOC, MCP-Framework-MOC
-
-📚 AI-MOC (61 linked notes)
-   Path: _mocs/AI-MOC.md
-   Links: chatgpt, ollama, langchain, aider, gp-nvim, MCP-Framework-MOC, ...
-   🔗 Links to MOCs: MCP-Framework-MOC, Development-MOC, DevOps-MOC, Tools-MOC, Work-MOC, 00-INDEX
-```
-
-This tool enables agents to understand your knowledge graph structure instantly, making navigation ~10x faster than blind keyword searching.
-
-## MCP Resources
-
-This server implements MCP resource support for HATEOAS-style discovery:
-
-- **Automatic Resource Links**: All search and list tools return resource links
-- **Direct Note Access**: Use resource URIs to read notes without searching
-- **Resource URI Format**: `obsidian-note://relative/path/to/note.md`
-- **Rich Metadata**: Resource links include tags, titles, and match counts
-
-**Example**: When you search for "MCP", results include resource links:
-```json
-{
-  "content": [
-    {
-      "type": "text",
-      "text": "Found 5 matches in 2 files for \"MCP\""
-    },
-    {
-      "type": "resource_link",
-      "uri": "obsidian-note://guides/MCP-Guide.md",
-      "name": "MCP Implementation Guide",
-      "description": "3 matches | Tags: mcp, guide, development"
-    }
-  ]
-}
-```
-
-Agents can then directly read the note using the resource URI, enabling seamless navigation through your knowledge base.
-
-## Security Features
-
-This server implements comprehensive security measures:
-
-- **Path Traversal Prevention**: All file paths are validated to prevent access outside the vault
-- **Input Validation**: All inputs validated against JSON schemas
-- **File Size Limits**: Configurable limits prevent memory exhaustion (default: 10MB)
-- **Content Sanitization**: Removes potentially harmful null bytes
-- **Markdown-only Access**: Only `.md` files can be accessed
-
-See [MCP_SPEC_COMPLIANCE.md](./MCP_SPEC_COMPLIANCE.md) for detailed compliance information.
-
-## Contributing
-
-1. Ensure all tests pass: `npm test`
-2. Maintain test coverage above 90%: `npm run coverage`
-3. Follow functional programming principles
-4. Add tests for new features
-5. Update documentation as needed
+Phase 1 complete: Group A tools implemented with 72+ unit tests and 6
+JS-parity golden tests passing. P2 (Group B CLI wrappers) is next.

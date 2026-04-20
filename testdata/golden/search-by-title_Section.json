@@ -1,0 +1,35 @@
+{
+  "tool": "search-by-title",
+  "args": {
+    "query": "Section",
+    "caseSensitive": false
+  },
+  "titles": [
+    {
+      "path": "journal/note-00007.md",
+      "title": "Note 00007 Section",
+      "line": 7
+    },
+    {
+      "path": "journal/note-00064.md",
+      "title": "Note 00064 Section",
+      "line": 7
+    },
+    {
+      "path": "notes/note-00026.md",
+      "title": "Note 00026 Section",
+      "line": 7
+    },
+    {
+      "path": "notes/note-00044.md",
+      "title": "Note 00044 Section",
+      "line": 1
+    },
+    {
+      "path": "projects/note-00011.md",
+      "title": "Note 00011 Section",
+      "line": 1
+    }
+  ],
+  "total": 5
+}

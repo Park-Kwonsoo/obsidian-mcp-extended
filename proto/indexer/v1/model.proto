@@ -1,0 +1,99 @@
+// model.proto — domain types for the indexer service.
+//
+// These are the shapes an Obsidian vault is ultimately *about*: a note, a
+// match inside a note, a context window around that match, a tag hit, a
+// file-change event. They exist independently of any specific RPC and can
+// be embedded in multiple request/response DTOs.
+//
+// Status: DESIGN ONLY. Stubs are not generated in P1; this file freezes
+// the contract so handler code can migrate to a daemon client in P5
+// without reshaping the data model.
+syntax = "proto3";
+
+package indexer.v1;
+
+option go_package = "obsidian-mcp/proto/indexer/v1;indexerpb";
+
+// ─── Search matches ───────────────────────────────────────────────────
+
+// One line inside a context window around a search match. Number is 1-based
+// so it displays directly as a file-line reference.
+message ContextLine {
+  int32 number = 1;
+  string text = 2;
+  bool is_match = 3;
+}
+
+// The context window around a single match, plus a pre-highlighted version
+// of the matched line (`**…**` wrapping). Markdown clients render the
+// highlight in bold; plain-text clients can show as-is.
+message MatchContext {
+  repeated ContextLine lines = 1;
+  string highlighted = 2;
+}
+
+// One matched line. 1-based line number, trimmed content, optional context
+// block when the client requested snippets.
+message Match {
+  int32 line = 1;
+  string content = 2;
+  MatchContext context = 3;
+}
+
+// All matches for a single note. MatchCount is the number of entries in
+// Matches *on this page* — the request's limit/offset may have split a
+// file's full match set across multiple responses.
+message FileMatches {
+  string path = 1;
+  int32 match_count = 2;
+  repeated Match matches = 3;
+}
+
+// ─── Titles ──────────────────────────────────────────────────────────
+
+// A hit from search-by-title. Line is the 1-based line number of the H1.
+message TitleHit {
+  string path = 1;
+  string title = 2;
+  int32 line = 3;
+}
+
+// ─── Tags ────────────────────────────────────────────────────────────
+
+// A note that matched a tag query. Tags is the union of all tags on the
+// note (frontmatter + inline), not only the ones the query asked for —
+// clients can use the extra tags to show related notes.
+message TagHit {
+  string path = 1;
+  repeated string tags = 2;
+}
+
+// ─── File-change subscription ────────────────────────────────────────
+
+enum ChangeKind {
+  CHANGE_KIND_UNSPECIFIED = 0;
+  CHANGE_KIND_CREATED = 1;
+  CHANGE_KIND_MODIFIED = 2;
+  CHANGE_KIND_DELETED = 3;
+  CHANGE_KIND_RENAMED = 4;
+}
+
+// Vault-relative change event. On RENAMED, path is the new location and
+// old_path is the previous one; for other kinds old_path is empty.
+message FileChangeEvent {
+  ChangeKind kind = 1;
+  string path = 2;
+  string old_path = 3;
+  int64 timestamp_ms = 4;
+}
+
+// ─── Pagination ──────────────────────────────────────────────────────
+
+// Standard pagination metadata returned by every list/search RPC.
+message Pagination {
+  int32 total = 1;
+  int32 returned = 2;
+  int32 limit = 3;
+  int32 offset = 4;
+  bool has_more = 5;
+}

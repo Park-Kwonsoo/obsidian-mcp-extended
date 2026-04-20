@@ -1,0 +1,11 @@
+{
+  "tool": "search-vault",
+  "args": {
+    "query": "context -deploy"
+  },
+  "paths": [
+    "_mocs/note-00014.md",
+    "journal/note-00038.md"
+  ],
+  "count": 2
+}

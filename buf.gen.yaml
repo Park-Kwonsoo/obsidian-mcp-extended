@@ -1,0 +1,23 @@
+# buf.gen.yaml — code-generation plan for `buf generate`.
+#
+# Two remote plugins:
+#   * `go`      emits the message structs that marshal to/from the wire.
+#   * `go-grpc` emits the server/client stubs for google.golang.org/grpc.
+#
+# Output lands under `proto/` so the generated *.pb.go files sit next to
+# the corresponding *.proto sources (e.g. proto/indexer/v1/model.pb.go).
+# The go_package option inside each .proto steers the import path to
+# obsidian-mcp/proto/indexer/v1.
+#
+# Generated files are gitignored — contributors run `make proto` locally
+# and CI generates them before building.
+version: v2
+plugins:
+  - remote: buf.build/protocolbuffers/go
+    out: proto
+    opt: paths=source_relative
+  - remote: buf.build/grpc/go
+    out: proto
+    opt:
+      - paths=source_relative
+      - require_unimplemented_servers=false

@@ -1,0 +1,138 @@
+// dto.proto — request and response messages for the indexer service.
+//
+// DTOs compose the domain shapes from model.proto with RPC-specific
+// parameters (vault path, pagination, query flags). Splitting the DTOs
+// out keeps the service definition in api.proto short enough to audit at
+// a glance, and lets non-RPC consumers (logging, tracing, replay tools)
+// import model.proto without dragging in the full API.
+syntax = "proto3";
+
+package indexer.v1;
+
+import "indexer/v1/model.proto";
+
+option go_package = "obsidian-mcp/proto/indexer/v1;indexerpb";
+
+// ─── ListNotes ───────────────────────────────────────────────────────
+
+message ListNotesRequest {
+  string vault_path = 1; // absolute path, required
+  string subdir = 2; // vault-relative; "" = whole vault
+  int32 limit = 3; // 0 → server default (실100)
+  int32 offset = 4;
+}
+
+message ListNotesResponse {
+  repeated string notes = 1; // vault-relative paths, sorted
+  Pagination pagination = 2;
+}
+
+// ─── ReadNote ────────────────────────────────────────────────────────
+
+message ReadNoteRequest {
+  string vault_path = 1;
+  // Exact vault-relative path OR bare filename (Obsidian wikilink resolution).
+  string path = 2;
+}
+
+message ReadNoteResponse {
+  // The resolved vault-relative path. Empty when multiple files share the
+  // bare-name input, in which case ambiguous_candidates is populated.
+  string resolved_path = 1;
+  string content = 2;
+  repeated string ambiguous_candidates = 3;
+}
+
+// ─── WriteNote ───────────────────────────────────────────────────────
+
+message WriteNoteRequest {
+  string vault_path = 1;
+  string path = 2; // vault-relative; must end in .md
+  string content = 3;
+}
+
+message WriteNoteResponse {
+  string resolved_path = 1;
+  int64 bytes_written = 2;
+}
+
+// ─── DeleteNote ──────────────────────────────────────────────────────
+
+message DeleteNoteRequest {
+  string vault_path = 1;
+  string path = 2;
+}
+
+message DeleteNoteResponse {
+  string deleted_path = 1;
+}
+
+// ─── SearchByTitle ───────────────────────────────────────────────────
+
+message SearchByTitleRequest {
+  string vault_path = 1;
+  string query = 2;
+  string subdir = 3;
+  bool case_sensitive = 4;
+  int32 limit = 5;
+  int32 offset = 6;
+}
+
+message SearchByTitleResponse {
+  repeated TitleHit results = 1;
+  Pagination pagination = 2;
+  int32 files_searched = 3;
+}
+
+// ─── SearchVault ─────────────────────────────────────────────────────
+
+message SearchVaultRequest {
+  string vault_path = 1;
+  string query = 2;
+  string subdir = 3;
+  bool case_sensitive = 4;
+  bool include_context = 5;
+  int32 context_lines = 6; // 0 → server default (2)
+  int32 limit = 7;
+  int32 offset = 8;
+}
+
+message SearchVaultResponse {
+  repeated FileMatches files = 1;
+  int32 total_matches = 2;
+  int32 file_count = 3;
+  int32 files_searched = 4;
+  Pagination pagination = 5;
+}
+
+// ─── SearchByTags ────────────────────────────────────────────────────
+
+message SearchByTagsRequest {
+  string vault_path = 1;
+  // AND (intersection) semantics. Leading `#` is stripped server-side.
+  repeated string tags = 2;
+  string subdir = 3;
+  bool case_sensitive = 4;
+}
+
+message SearchByTagsResponse {
+  repeated TagHit notes = 1;
+  int32 count = 2;
+}
+
+// ─── SubscribeFileChanges ────────────────────────────────────────────
+
+message SubscribeFileChangesRequest {
+  string vault_path = 1;
+  // When true, the daemon replays an initial event per existing .md before
+  // switching to live watch — lets a fresh client start with a consistent
+  // view without an extra ListNotes round-trip.
+  bool initial_snapshot = 2;
+}
+
+// Wrapper around a single FileChangeEvent so buf's request/response lint
+// stays happy. Future fields (e.g. batched events, drop-notices) can slot
+// in here without breaking the stream type.
+message SubscribeFileChangesResponse {
+  FileChangeEvent event = 1;
+}

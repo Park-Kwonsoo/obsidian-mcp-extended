@@ -1,0 +1,17 @@
+{
+  "tool": "list-notes",
+  "args": {
+    "directory": "_mocs",
+    "limit": 100000,
+    "offset": 0
+  },
+  "paths": [
+    "_mocs/note-00003.md",
+    "_mocs/note-00014.md",
+    "_mocs/note-00035.md",
+    "_mocs/note-00081.md",
+    "_mocs/note-00094.md"
+  ],
+  "count": 5,
+  "total": 5
+}

@@ -1,0 +1,53 @@
+// api.proto — service definition for the indexer daemon.
+//
+// The actual data shapes live in model.proto (domain types) and dto.proto
+// (request/response messages). Keeping this file service-only means the
+// whole public API of the daemon is readable top-to-bottom here without
+// scrolling through 150 lines of message definitions first.
+//
+// Status: DESIGN ONLY. Stubs are not generated in P1. See
+// proto/indexer/v1/README.md for the daemon/fallback story.
+syntax = "proto3";
+
+package indexer.v1;
+
+// model.proto is intentionally not imported here — api.proto only references
+// DTOs, which carry their own model.proto imports transitively.
+import "indexer/v1/dto.proto";
+
+option go_package = "obsidian-mcp/proto/indexer/v1;indexerpb";
+
+// Indexer is the RPC surface exposed by obsidian-indexerd. The daemon holds
+// a warm in-memory index keyed by absolute vault path, supports multiple
+// vaults simultaneously, and serves read/write/search traffic over a Unix
+// domain socket. The MCP server uses this when OBSIDIAN_MCP_DAEMON is set;
+// otherwise it falls back to calling the internal packages in-process.
+//
+// Design notes:
+//
+//   1. Every RPC is stateless at the transport layer — vault_path is part
+//      of each request, so the daemon can be restarted or load-balanced
+//      without breaking clients.
+//
+//   2. List/search responses paginate rather than stream. Streaming gives
+//      no measurable benefit for the "fetch a page, maybe fetch the next"
+//      flow MCP clients use. The one exception is SubscribeFileChanges,
+//      where push semantics are load-bearing.
+//
+//   3. Forward compatibility follows the standard proto3 rules: new enum
+//      values are additive and unknown fields are ignored.
+service IndexerService {
+  rpc ListNotes(ListNotesRequest) returns (ListNotesResponse);
+  rpc ReadNote(ReadNoteRequest) returns (ReadNoteResponse);
+  rpc WriteNote(WriteNoteRequest) returns (WriteNoteResponse);
+  rpc DeleteNote(DeleteNoteRequest) returns (DeleteNoteResponse);
+  rpc SearchByTitle(SearchByTitleRequest) returns (SearchByTitleResponse);
+  rpc SearchVault(SearchVaultRequest) returns (SearchVaultResponse);
+  rpc SearchByTags(SearchByTagsRequest) returns (SearchByTagsResponse);
+
+  // Server-streaming RPC: the daemon pushes FileChangeEvent rows (wrapped
+  // in SubscribeFileChangesResponse for buf's request/response naming
+  // convention) as vault files mutate. The client cancels the RPC to
+  // stop receiving events.
+  rpc SubscribeFileChanges(SubscribeFileChangesRequest) returns (stream SubscribeFileChangesResponse);
+}

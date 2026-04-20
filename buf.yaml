@@ -1,0 +1,17 @@
+# buf.yaml — workspace config at the repo root so buf-lsp resolves
+# cross-file imports (indexer/v1/model.proto → proto/indexer/v1/model.proto)
+# no matter which .proto the editor opens.
+#
+# The Buf toolchain (lint, breaking-change detection, BSR plugins) pairs
+# with the google.golang.org/grpc runtime. See proto/indexer/v1/README.md
+# for the rationale and the deferred Connect-vs-native benchmark.
+version: v2
+modules:
+  - path: proto
+    name: buf.build/obsidian-mcp/indexer
+lint:
+  use:
+    - STANDARD
+breaking:
+  use:
+    - FILE
