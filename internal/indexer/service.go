@@ -50,6 +50,21 @@ func NewServer() *Server {
 	return &Server{vaults: map[string]*vaultRecord{}}
 }
 
+// Close shuts down every per-vault watcher so active SubscribeFileChanges
+// RPCs unblock and grpc.GracefulStop can finish. Called by the daemon
+// binary on SIGINT/SIGTERM before GracefulStop. Safe to call multiple
+// times — the watcher tracks its own closed state.
+func (s *Server) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, rec := range s.vaults {
+		if rec.watcher != nil {
+			_ = rec.watcher.Close()
+		}
+	}
+	return nil
+}
+
 // getVault opens (on first use) and returns the vaultRecord for root.
 // The watcher is started the same time as the vault handle so cached
 // state becomes invalid the instant the user touches a file — no stale
