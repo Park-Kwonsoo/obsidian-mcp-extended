@@ -5,7 +5,6 @@
 package search
 
 import (
-	"bufio"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -39,23 +38,19 @@ type TitleResults struct {
 // so "Setup #draft" is findable by query "Setup".
 var inlineTagSuffix = regexp.MustCompile(`\s+#\w+(\s+#\w+)*$`)
 
-// extractH1 scans the first non-empty H1 ("# ") in content, returns the
-// trimmed title (inline-tag suffix stripped) and its 1-based line number. Only
-// H1 — deeper headings are ignored on purpose, matching title-search.js.
-// Streaming-read so a 10 MiB note with an H1 at line 3 doesn't force the whole
-// file into memory.
-func extractH1(f *os.File) (title string, line int, ok bool) {
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024) // support long lines
-	n := 0
-	for scanner.Scan() {
-		n++
-		t := strings.TrimSpace(scanner.Text())
-		// Match "# foo" but not "## foo". Explicit length+space check is faster
-		// than a regex and this path runs once per note.
+// FirstH1 walks lines and returns the title (trimmed, inline-tag suffix
+// stripped) and 1-based line number of the first `# ` heading. Only H1 —
+// deeper headings are ignored on purpose, matching the legacy JS parser.
+// One canonical implementation so title/content/metadata tools can't drift
+// on what counts as "the title of a note".
+func FirstH1(lines []string) (title string, line int, ok bool) {
+	for i, ln := range lines {
+		t := strings.TrimSpace(ln)
+		// Match "# foo" but not "## foo". Explicit length+space check is
+		// faster than a regex and this path runs once per note.
 		if len(t) >= 2 && t[0] == '#' && t[1] == ' ' {
 			raw := strings.TrimSpace(t[2:])
-			return inlineTagSuffix.ReplaceAllString(raw, ""), n, true
+			return inlineTagSuffix.ReplaceAllString(raw, ""), i + 1, true
 		}
 	}
 	return "", 0, false
@@ -91,12 +86,11 @@ func SearchByTitle(v *vault.Vault, query, subdir string, caseSensitive bool) (Ti
 
 	out := make([]TitleHit, 0, 16)
 	for _, rel := range files {
-		f, err := os.Open(filepath.Join(v.Root, rel))
+		data, err := os.ReadFile(filepath.Join(v.Root, rel))
 		if err != nil {
 			continue // unreadable files don't abort the whole search
 		}
-		title, line, ok := extractH1(f)
-		f.Close()
+		title, line, ok := FirstH1(strings.Split(string(data), "\n"))
 		if !ok {
 			continue
 		}

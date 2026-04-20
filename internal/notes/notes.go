@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"obsidian-mcp/internal/metadata"
+	"obsidian-mcp/internal/search"
 	"obsidian-mcp/internal/vault"
 )
 
@@ -75,19 +76,12 @@ func metadataFromContent(rel, content string) Metadata {
 	}
 }
 
-// firstH1 returns the first `# Title` line's text (trimmed, inline-tag suffix
-// removed), or "" if the note has no H1. Kept inline — it's a one-pass scan
-// that doesn't justify exporting yet another helper.
-var inlineTagSuffix = regexp.MustCompile(`\s+#\w+(\s+#\w+)*$`)
-
+// firstH1 returns the first `# Title` text from content, or "" if absent.
+// Thin delegation to search.FirstH1 so the "what counts as the note title"
+// rule lives in exactly one place.
 func firstH1(content string) string {
-	for _, line := range strings.Split(content, "\n") {
-		t := strings.TrimSpace(line)
-		if strings.HasPrefix(t, "# ") && !strings.HasPrefix(t, "## ") {
-			return inlineTagSuffix.ReplaceAllString(strings.TrimSpace(t[2:]), "")
-		}
-	}
-	return ""
+	title, _, _ := search.FirstH1(strings.Split(content, "\n"))
+	return title
 }
 
 // preview returns the first up-to-MaxPreviewLen chars of content with

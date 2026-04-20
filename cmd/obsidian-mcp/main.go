@@ -223,11 +223,34 @@ func daemonListNotes(ctx context.Context, c pb.IndexerServiceClient, vaultRoot s
 	}, nil
 }
 
-func handleReadNote(v *vault.Vault) func(context.Context, *mcp.CallToolRequest, readNoteArgs) (*mcp.CallToolResult, any, error) {
-	return func(_ context.Context, _ *mcp.CallToolRequest, args readNoteArgs) (*mcp.CallToolResult, any, error) {
+// readNoteResponse is the success-path rendering used by both the daemon
+// and in-process code paths. Ambiguous name resolution is handled in the
+// handler itself since it needs to reach for mcp.CallToolResult.
+func readNoteResponse(content, rel string) (*mcp.CallToolResult, any, error) {
+	return toolResult(content, map[string]any{"path": rel, "content": content})
+}
+
+func handleReadNote(v *vault.Vault, daemon pb.IndexerServiceClient) func(context.Context, *mcp.CallToolRequest, readNoteArgs) (*mcp.CallToolResult, any, error) {
+	return func(ctx context.Context, _ *mcp.CallToolRequest, args readNoteArgs) (*mcp.CallToolResult, any, error) {
+		if daemon != nil {
+			content, rel, err := daemonReadNote(ctx, daemon, v.Root, args.Path)
+			if err == nil {
+				return readNoteResponse(content, rel)
+			}
+			// Ambiguity is a user-facing diagnostic, not a reason to retry
+			// locally (the daemon and local paths share the same vault).
+			var amb *ambiguousReadErr
+			if errors.As(err, &amb) {
+				msg, _ := json.Marshal(map[string]any{"ambiguous": true, "candidates": amb.candidates})
+				return &mcp.CallToolResult{
+					Content: []mcp.Content{&mcp.TextContent{Text: string(msg)}},
+					IsError: true,
+				}, nil, nil
+			}
+			// Fall through to in-process on other errors (daemon crash, etc).
+		}
 		content, rel, err := v.ReadNote(args.Path)
 		if err != nil {
-			// Ambiguous resolution is a user-facing case: tell them which candidates matched.
 			var amb *vault.ErrAmbiguous
 			if errors.As(err, &amb) {
 				msg, _ := json.Marshal(map[string]any{"ambiguous": true, "candidates": amb.Candidates})
@@ -238,17 +261,23 @@ func handleReadNote(v *vault.Vault) func(context.Context, *mcp.CallToolRequest, 
 			}
 			return nil, nil, err
 		}
-		// Return the resolved vault-relative path, not the raw user input —
-		// otherwise a bare filename that resolves deep in the tree would leak
-		// back as `note.md` and mislead clients into writing to the wrong spot.
-		return toolResult(content, map[string]any{"path": rel, "content": content})
+		return readNoteResponse(content, rel)
 	}
 }
 
-func handleWriteNote(v *vault.Vault) func(context.Context, *mcp.CallToolRequest, writeNoteArgs) (*mcp.CallToolResult, any, error) {
-	return func(_ context.Context, _ *mcp.CallToolRequest, args writeNoteArgs) (*mcp.CallToolResult, any, error) {
-		rel, err := v.WriteNote(args.Path, args.Content)
-		if err != nil {
+func handleWriteNote(v *vault.Vault, daemon pb.IndexerServiceClient) func(context.Context, *mcp.CallToolRequest, writeNoteArgs) (*mcp.CallToolResult, any, error) {
+	return func(ctx context.Context, _ *mcp.CallToolRequest, args writeNoteArgs) (*mcp.CallToolResult, any, error) {
+		var rel string
+		var err error
+		if daemon != nil {
+			if rel, err = daemonWriteNote(ctx, daemon, v.Root, args.Path, args.Content); err == nil {
+				return toolResult(
+					fmt.Sprintf("Wrote %d bytes to %s", len(args.Content), rel),
+					map[string]any{"path": rel, "bytes": len(args.Content), "success": true},
+				)
+			}
+		}
+		if rel, err = v.WriteNote(args.Path, args.Content); err != nil {
 			return nil, nil, err
 		}
 		return toolResult(
@@ -258,8 +287,13 @@ func handleWriteNote(v *vault.Vault) func(context.Context, *mcp.CallToolRequest,
 	}
 }
 
-func handleDeleteNote(v *vault.Vault) func(context.Context, *mcp.CallToolRequest, deleteNoteArgs) (*mcp.CallToolResult, any, error) {
-	return func(_ context.Context, _ *mcp.CallToolRequest, args deleteNoteArgs) (*mcp.CallToolResult, any, error) {
+func handleDeleteNote(v *vault.Vault, daemon pb.IndexerServiceClient) func(context.Context, *mcp.CallToolRequest, deleteNoteArgs) (*mcp.CallToolResult, any, error) {
+	return func(ctx context.Context, _ *mcp.CallToolRequest, args deleteNoteArgs) (*mcp.CallToolResult, any, error) {
+		if daemon != nil {
+			if err := daemonDeleteNote(ctx, daemon, v.Root, args.Path); err == nil {
+				return toolResult("Deleted "+args.Path, map[string]any{"path": args.Path, "success": true})
+			}
+		}
 		if err := v.DeleteNote(args.Path); err != nil {
 			return nil, nil, err
 		}
@@ -267,8 +301,21 @@ func handleDeleteNote(v *vault.Vault) func(context.Context, *mcp.CallToolRequest
 	}
 }
 
-func handleSearchByTitle(v *vault.Vault) func(context.Context, *mcp.CallToolRequest, searchByTitleArgs) (*mcp.CallToolResult, any, error) {
-	return func(_ context.Context, _ *mcp.CallToolRequest, args searchByTitleArgs) (*mcp.CallToolResult, any, error) {
+func handleSearchByTitle(v *vault.Vault, daemon pb.IndexerServiceClient) func(context.Context, *mcp.CallToolRequest, searchByTitleArgs) (*mcp.CallToolResult, any, error) {
+	return func(ctx context.Context, _ *mcp.CallToolRequest, args searchByTitleArgs) (*mcp.CallToolResult, any, error) {
+		if daemon != nil {
+			if res, pg, err := daemonSearchByTitle(ctx, daemon, v.Root, args.Query, args.Path, args.CaseSensitive, args.Limit, args.Offset); err == nil {
+				return toolResult(
+					fmt.Sprintf("Found %d titles (searched %d files)", pg.Total, res.FilesSearched),
+					map[string]any{
+						"results":       res.Results,
+						"count":         res.Count,
+						"filesSearched": res.FilesSearched,
+						"pagination":    pg,
+					},
+				)
+			}
+		}
 		res, err := search.SearchByTitle(v, args.Query, args.Path, args.CaseSensitive)
 		if err != nil {
 			return nil, nil, err
@@ -288,8 +335,8 @@ func handleSearchByTitle(v *vault.Vault) func(context.Context, *mcp.CallToolRequ
 	}
 }
 
-func handleSearchVault(v *vault.Vault) func(context.Context, *mcp.CallToolRequest, searchVaultArgs) (*mcp.CallToolResult, any, error) {
-	return func(_ context.Context, _ *mcp.CallToolRequest, args searchVaultArgs) (*mcp.CallToolResult, any, error) {
+func handleSearchVault(v *vault.Vault, daemon pb.IndexerServiceClient) func(context.Context, *mcp.CallToolRequest, searchVaultArgs) (*mcp.CallToolResult, any, error) {
+	return func(ctx context.Context, _ *mcp.CallToolRequest, args searchVaultArgs) (*mcp.CallToolResult, any, error) {
 		// Resolve includeContext and contextLines defaults here (not in the
 		// library) so explicit falsy values (`includeContext:false`,
 		// `contextLines:0`) are preserved end-to-end while omitted fields pick
@@ -302,12 +349,19 @@ func handleSearchVault(v *vault.Vault) func(context.Context, *mcp.CallToolReques
 		if args.ContextLines != nil {
 			ctxLines = *args.ContextLines
 		}
-		res, err := search.SearchVault(v, args.Query, search.VaultOpts{
-			CaseSensitive:  args.CaseSensitive,
-			IncludeContext: includeCtx,
-			ContextLines:   ctxLines,
-			Subdir:         args.Path,
-		})
+		var res search.VaultResults
+		var err error
+		if daemon != nil {
+			res, err = daemonSearchVault(ctx, daemon, v.Root, args.Query, args.Path, args.CaseSensitive, includeCtx, ctxLines)
+		}
+		if daemon == nil || err != nil {
+			res, err = search.SearchVault(v, args.Query, search.VaultOpts{
+				CaseSensitive:  args.CaseSensitive,
+				IncludeContext: includeCtx,
+				ContextLines:   ctxLines,
+				Subdir:         args.Path,
+			})
+		}
 		if err != nil {
 			return nil, nil, err
 		}
@@ -364,13 +418,18 @@ func sliceMatchRange(files []search.FileMatches, start, end int) []search.FileMa
 	return out
 }
 
-func handleSearchByTags(v *vault.Vault) func(context.Context, *mcp.CallToolRequest, searchByTagsArgs) (*mcp.CallToolResult, any, error) {
-	return func(_ context.Context, _ *mcp.CallToolRequest, args searchByTagsArgs) (*mcp.CallToolResult, any, error) {
+func handleSearchByTags(v *vault.Vault, daemon pb.IndexerServiceClient) func(context.Context, *mcp.CallToolRequest, searchByTagsArgs) (*mcp.CallToolResult, any, error) {
+	return func(ctx context.Context, _ *mcp.CallToolRequest, args searchByTagsArgs) (*mcp.CallToolResult, any, error) {
 		// Prefer `path` (current contract) but fall back to the legacy
 		// `directory` field so existing clients keep scoping the search.
 		subdir := args.Path
 		if subdir == "" {
 			subdir = args.Directory
+		}
+		if daemon != nil {
+			if res, err := daemonSearchByTags(ctx, daemon, v.Root, args.Tags, subdir, args.CaseSensitive); err == nil {
+				return toolResult(fmt.Sprintf("Found %d notes matching tags %v", res.Count, args.Tags), res)
+			}
 		}
 		res, err := search.SearchByTags(v, args.Tags, subdir, args.CaseSensitive)
 		if err != nil {
@@ -398,6 +457,7 @@ func main() {
 	}, nil)
 
 	daemon := dialDaemon()
+	_ = daemon // silence unused warning when tests compile main without routing
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list-notes",
@@ -407,32 +467,32 @@ func main() {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "read-note",
 		Description: "Read a note's full content. Accepts an exact vault-relative path OR a bare filename (Obsidian wikilink resolution).",
-	}, handleReadNote(v))
+	}, handleReadNote(v, daemon))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "write-note",
 		Description: "Create or overwrite a note atomically. Path must end in .md.",
-	}, handleWriteNote(v))
+	}, handleWriteNote(v, daemon))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "delete-note",
 		Description: "Delete a note from the vault. Path must end in .md.",
-	}, handleDeleteNote(v))
+	}, handleDeleteNote(v, daemon))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search-by-title",
 		Description: "Find notes whose H1 title (# Title) contains the given substring.",
-	}, handleSearchByTitle(v))
+	}, handleSearchByTitle(v, daemon))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search-vault",
 		Description: "Full-text search across notes. Supports boolean (AND OR NOT), quoted phrases, field scopes (title:, tag:, content:), grouping with parentheses, and context snippets.",
-	}, handleSearchVault(v))
+	}, handleSearchVault(v, daemon))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search-by-tags",
 		Description: "Find notes that contain ALL requested tags (frontmatter or inline). Leading # is optional.",
-	}, handleSearchByTags(v))
+	}, handleSearchByTags(v, daemon))
 
 	// fs-native tools that don't fit the search package: metadata lookup,
 	// MOC discovery, section read, patch, checkbox toggle.

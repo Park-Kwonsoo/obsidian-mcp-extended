@@ -1,12 +1,13 @@
 package search
 
 import (
-	"bufio"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"obsidian-mcp/internal/config"
+	"obsidian-mcp/internal/metadata"
 	"obsidian-mcp/internal/vault"
 )
 
@@ -131,13 +132,15 @@ func findMatches(content string, expr *Expr, _ string, opts VaultOpts) []Match {
 
 	// Pure field: single-node expression of that kind, no AND/OR/NOT.
 	if expr.Type == NodeField && expr.Field == "title" {
-		idx := findH1Index(lines)
-		if idx < 0 {
+		_, line, ok := FirstH1(lines)
+		if !ok {
 			return nil
 		}
-		m := Match{Line: idx + 1, Content: strings.TrimSpace(lines[idx])}
+		idx := line - 1
+		m := Match{Line: line, Content: strings.TrimSpace(lines[idx])}
 		if opts.IncludeContext {
-			ctx := BuildContext(lines, idx, opts.ContextLines, expr.Value)
+			ctx := BuildContext(lines, idx, opts.ContextLines,
+				CompileHighlighter(expr.Value, opts.CaseSensitive))
 			m.Context = &ctx
 		}
 		return []Match{m}
@@ -153,6 +156,18 @@ func findMatches(content string, expr *Expr, _ string, opts VaultOpts) []Match {
 	termsLower := make([]string, len(terms))
 	for i, t := range terms {
 		termsLower[i] = strings.ToLower(t)
+	}
+
+	// Pre-compile one highlighter per positive term. Without this cache a
+	// document with N matching lines recompiled the same regex N times —
+	// see simplify review for the efficiency trace. Nil entry is fine;
+	// HighlightWith is nil-safe.
+	var highlighters map[string]*regexp.Regexp
+	if opts.IncludeContext {
+		highlighters = make(map[string]*regexp.Regexp, len(terms))
+		for _, t := range terms {
+			highlighters[t] = CompileHighlighter(t, opts.CaseSensitive)
+		}
 	}
 
 	out := make([]Match, 0, 8)
@@ -177,7 +192,7 @@ func findMatches(content string, expr *Expr, _ string, opts VaultOpts) []Match {
 		}
 		m := Match{Line: i + 1, Content: strings.TrimSpace(ln)}
 		if opts.IncludeContext {
-			ctx := BuildContext(lines, i, opts.ContextLines, hitTerm)
+			ctx := BuildContext(lines, i, opts.ContextLines, highlighters[hitTerm])
 			m.Context = &ctx
 		}
 		out = append(out, m)
@@ -185,99 +200,14 @@ func findMatches(content string, expr *Expr, _ string, opts VaultOpts) []Match {
 	return out
 }
 
-// findH1Index returns the 0-based index of the first `# heading` line, or -1.
-func findH1Index(lines []string) int {
-	for i, ln := range lines {
-		t := strings.TrimSpace(ln)
-		if len(t) >= 2 && t[0] == '#' && t[1] == ' ' {
-			return i
-		}
-	}
-	return -1
-}
-
-// extractDocMeta is a minimal-cost title+tag extractor used by SearchVault.
-// It only scans what's needed and stops once both are resolved — cheap enough
-// to run on every document during a content search. The fuller parser used
-// by search-by-tags lives in internal/metadata.
-//
-// Streaming over lines avoids allocating a whole []string when we only need
-// the first heading and any line beginning with `tags:`. Both `tags: [a, b]`
-// and the YAML-list form (`tags:` followed by `  - a` / `  - b`) are
-// recognized so tag-scoped search-vault queries match search-by-tags.
+// extractDocMeta returns the first H1 title and the full set of tags for a
+// note. Delegates to FirstH1 and metadata.ExtractFrontmatterTags rather than
+// parsing inline — what used to be a hand-rolled YAML walker here drifted
+// out of parity with the search-by-tags parser twice in a row, so now the
+// two tools call the same code.
 func extractDocMeta(content string) (title string, tags []string) {
-	sc := bufio.NewScanner(strings.NewReader(content))
-	sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	inFrontmatter := false
-	inTagsList := false
-	lineNo := 0
-	for sc.Scan() {
-		lineNo++
-		line := sc.Text()
-		trimmed := strings.TrimSpace(line)
-
-		if lineNo == 1 && trimmed == "---" {
-			inFrontmatter = true
-			continue
-		}
-		if inFrontmatter {
-			if trimmed == "---" {
-				inFrontmatter = false
-				inTagsList = false
-				continue
-			}
-			if inTagsList {
-				// YAML list items under `tags:` start with `-`.
-				if strings.HasPrefix(trimmed, "-") {
-					item := strings.TrimSpace(strings.TrimPrefix(trimmed, "-"))
-					item = strings.Trim(item, `"'`)
-					if item != "" {
-						tags = append(tags, item)
-					}
-					continue
-				}
-				// Any non-list line ends the tags block; fall through so
-				// this line can itself start a new `tags:` section or be
-				// ignored like the rest of the frontmatter.
-				inTagsList = false
-			}
-			if strings.HasPrefix(trimmed, "tags:") {
-				rest := strings.TrimSpace(trimmed[len("tags:"):])
-				if rest == "" {
-					// Bare `tags:` — list items follow on subsequent lines.
-					inTagsList = true
-				} else {
-					tags = append(tags, parseInlineTagList(rest)...)
-				}
-			}
-			continue
-		}
-
-		if title == "" && strings.HasPrefix(trimmed, "# ") {
-			title = strings.TrimSpace(trimmed[2:])
-		}
-	}
-	return title, tags
+	lines := strings.Split(content, "\n")
+	title, _, _ = FirstH1(lines)
+	return title, metadata.ExtractFrontmatterTags(content)
 }
 
-// parseInlineTagList parses `[foo, bar]` or `foo` style into a slice. For `- foo`
-// YAML list form we defer to the richer parser in internal/metadata; this
-// inline form is sufficient for the fast-path search meta lookup.
-func parseInlineTagList(s string) []string {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return nil
-	}
-	if strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]") {
-		s = s[1 : len(s)-1]
-	}
-	var out []string
-	for _, part := range strings.Split(s, ",") {
-		p := strings.TrimSpace(part)
-		p = strings.Trim(p, `"'`)
-		if p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}

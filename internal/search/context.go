@@ -9,7 +9,7 @@ import (
 // 1-based (matching how users see line numbers in editors); IsMatch flags the
 // line that actually hit the query so clients can render it differently.
 type ContextLine struct {
-	Number int    `json:"number"`
+	Number  int    `json:"number"`
 	Text    string `json:"text"`
 	IsMatch bool   `json:"isMatch"`
 }
@@ -37,10 +37,12 @@ func ExtractContext(lines []string, matchIdx, contextSize int) (out []string, st
 	return lines[start : end+1], start, matchIdx - start
 }
 
-// BuildContext composes a Context around a match. Lines longer than
-// maxContextLineLength are truncated with "..." — the full file content is
-// still available via read-note, so this is purely a display concern.
-func BuildContext(lines []string, matchIdx, contextSize int, highlightTerm string) Context {
+// BuildContext composes a Context around a match using a pre-compiled
+// highlighter regex. Pre-compilation is a per-search optimization: the same
+// query term matches every result line, so recompiling per match was pure
+// waste. Pass nil highlighter to skip highlighting (useful for tools that
+// don't render the `**…**` convention).
+func BuildContext(lines []string, matchIdx, contextSize int, highlighter *regexp.Regexp) Context {
 	slice, startIdx, relIdx := ExtractContext(lines, matchIdx, contextSize)
 
 	out := make([]ContextLine, len(slice))
@@ -63,16 +65,17 @@ func BuildContext(lines []string, matchIdx, contextSize int, highlightTerm strin
 
 	return Context{
 		Lines:       out,
-		Highlighted: Highlight(matchLine, highlightTerm, false),
+		Highlighted: HighlightWith(matchLine, highlighter),
 	}
 }
 
-// Highlight wraps every occurrence of term in line with `**…**` for markdown
-// bold. Returns line unchanged when either side is empty. The `**` convention
-// is preserved from the JS server so existing MCP clients render identically.
-func Highlight(line, term string, caseSensitive bool) string {
-	if line == "" || term == "" {
-		return line
+// CompileHighlighter turns a bare search term into a regex that matches
+// every occurrence in a line. Returns nil when term is empty — BuildContext
+// and HighlightWith treat nil as "skip highlight". The nil-safe return
+// keeps hot-path callers from having to branch on empty terms themselves.
+func CompileHighlighter(term string, caseSensitive bool) *regexp.Regexp {
+	if term == "" {
+		return nil
 	}
 	pattern := regexp.QuoteMeta(term)
 	if !caseSensitive {
@@ -80,11 +83,29 @@ func Highlight(line, term string, caseSensitive bool) string {
 	}
 	re, err := regexp.Compile(pattern)
 	if err != nil {
+		return nil
+	}
+	return re
+}
+
+// HighlightWith wraps every match of the highlighter regex with `**…**`.
+// Returns line unchanged on nil regex or empty line. The `**` convention
+// is preserved from the JS server so existing MCP clients render
+// identically.
+func HighlightWith(line string, highlighter *regexp.Regexp) string {
+	if line == "" || highlighter == nil {
 		return line
 	}
-	return re.ReplaceAllStringFunc(line, func(match string) string {
-		return "**" + match + "**"
+	return highlighter.ReplaceAllStringFunc(line, func(m string) string {
+		return "**" + m + "**"
 	})
+}
+
+// Highlight is a convenience wrapper that compiles and applies in one call.
+// Hot-path callers (SearchVault match loop) should use CompileHighlighter +
+// HighlightWith instead to avoid recompiling the same regex per match.
+func Highlight(line, term string, caseSensitive bool) string {
+	return HighlightWith(line, CompileHighlighter(term, caseSensitive))
 }
 
 // ExtractSnippet pulls snippetRadius characters each side of matchPos from
