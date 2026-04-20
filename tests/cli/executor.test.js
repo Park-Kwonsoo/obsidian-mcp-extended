@@ -140,5 +140,17 @@ describe('CLI Executor', () => {
       await expect(execCli('read', { path: 'test.md' }))
         .rejects.toThrow('Obsidian app is not running');
     });
+
+    // Obsidian CLI reports domain errors (e.g. file-not-found) via exit 0 with
+    // an "Error: ..." line on stdout. Callers used to misparse that as data;
+    // execCli now surfaces it as an execution error.
+    it('should throw on "Error:" prefix in stdout even when exit code is 0', async () => {
+      execFile.mockImplementationOnce((cmd, args, opts, cb) => {
+        cb(null, 'Error: File "missing.md" not found.\n', '');
+      });
+
+      await expect(execCli('read', { path: 'missing.md' }))
+        .rejects.toThrow(/File "missing\.md" not found/);
+    });
   });
 });

@@ -170,6 +170,18 @@ export async function execCli(command, args = {}, options = {}) {
     );
   }
 
+  // Obsidian CLI reports errors (file not found, invalid args) as exit 0 with
+  // `Error: <message>` on stdout. Without this guard callers would misparse the
+  // error string as data — e.g. get-backlinks was fabricating a backlink whose
+  // path was the error message itself.
+  if (/^Error:\s/.test(result.stdout)) {
+    throw new CliExecutionError(
+      `obsidian ${cliArgs.join(' ')}`,
+      0,
+      result.stdout
+    );
+  }
+
   return result;
 }
 

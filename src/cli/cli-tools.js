@@ -22,24 +22,36 @@ function parseFileList(stdout) {
 
 /**
  * Get all notes that link to a specific note.
+ *
+ * The Obsidian CLI ignores `format=json` for empty results and returns the
+ * plain sentinel `"No backlinks found."`. It also shapes entries as
+ * `{ file }` rather than `{ path }`. We normalize both so downstream consumers
+ * see a stable `{ backlinks: [{path}], count }` contract.
  */
 export async function getBacklinks(vaultPath, notePath) {
   const paramValidation = validateRequiredParameters({ path: notePath }, ['path']);
   assertValid(paramValidation, (msg) => Errors.invalidParams(msg));
 
   const result = await execCli('backlinks', { file: notePath, format: 'json' });
+  const stdout = result.stdout.trim();
 
-  let backlinks;
-  try {
-    backlinks = JSON.parse(result.stdout);
-  } catch {
-    backlinks = parseFileList(result.stdout).map(f => ({ path: f }));
+  if (stdout === '' || /^No backlinks found\.?$/i.test(stdout)) {
+    return { backlinks: [], count: 0 };
   }
 
-  return {
-    backlinks: Array.isArray(backlinks) ? backlinks : [],
-    count: Array.isArray(backlinks) ? backlinks.length : 0,
-  };
+  let parsed;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    throw Errors.internalError(
+      `Obsidian CLI returned unparseable backlinks output: ${stdout.slice(0, 200)}`
+    );
+  }
+
+  const entries = Array.isArray(parsed) ? parsed : [];
+  const backlinks = entries.map(e => ({ path: e.path ?? e.file ?? String(e) }));
+
+  return { backlinks, count: backlinks.length };
 }
 
 /**

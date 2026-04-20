@@ -26,21 +26,50 @@ describe('CLI Tools', () => {
   });
 
   describe('getBacklinks', () => {
-    it('should parse backlinks from CLI output', async () => {
-      execCli.mockResolvedValue({ stdout: 'note1.md\nnote2.md\n', stderr: '', exitCode: 0 });
+    it('should handle JSON output with {file} shape from Obsidian CLI', async () => {
+      execCli.mockResolvedValue({
+        stdout: JSON.stringify([{ file: 'a.md' }, { file: 'b.md' }]),
+        stderr: '', exitCode: 0,
+      });
       const result = await getBacklinks('/vault', 'target.md');
       expect(result.count).toBe(2);
-      expect(result.backlinks).toHaveLength(2);
-      expect(result.backlinks[0].path).toBe('note1.md');
+      expect(result.backlinks[0].path).toBe('a.md');
     });
 
-    it('should handle JSON output', async () => {
+    it('should handle JSON output with {path} shape', async () => {
       execCli.mockResolvedValue({
         stdout: JSON.stringify([{ path: 'a.md' }, { path: 'b.md' }]),
         stderr: '', exitCode: 0,
       });
       const result = await getBacklinks('/vault', 'target.md');
       expect(result.count).toBe(2);
+      expect(result.backlinks[0].path).toBe('a.md');
+    });
+
+    // Regression: the CLI ignores format=json for empty results and returns
+    // plain "No backlinks found." — the previous code parsed that line as a
+    // literal file path, producing { count: 1, backlinks: [{path: "No backlinks..."}] }.
+    it('should return empty for "No backlinks found." sentinel', async () => {
+      execCli.mockResolvedValue({
+        stdout: 'No backlinks found.', stderr: '', exitCode: 0,
+      });
+      const result = await getBacklinks('/vault', 'target.md');
+      expect(result.count).toBe(0);
+      expect(result.backlinks).toHaveLength(0);
+    });
+
+    it('should return empty for empty stdout', async () => {
+      execCli.mockResolvedValue({ stdout: '', stderr: '', exitCode: 0 });
+      const result = await getBacklinks('/vault', 'target.md');
+      expect(result.count).toBe(0);
+    });
+
+    it('should throw on unparseable non-sentinel output rather than fabricate data', async () => {
+      execCli.mockResolvedValue({
+        stdout: 'something totally unexpected\nnot json nor sentinel',
+        stderr: '', exitCode: 0,
+      });
+      await expect(getBacklinks('/vault', 'target.md')).rejects.toThrow(/unparseable/i);
     });
 
     it('should throw on missing path', async () => {
