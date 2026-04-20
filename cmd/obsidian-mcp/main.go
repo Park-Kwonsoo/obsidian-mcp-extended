@@ -396,6 +396,10 @@ func main() {
 		Description: "Find notes that contain ALL requested tags (frontmatter or inline). Leading # is optional.",
 	}, handleSearchByTags(v))
 
+	// fs-native tools that don't fit the search package: metadata lookup,
+	// MOC discovery, section read, patch, checkbox toggle.
+	registerNoteTools(server, v)
+
 	// Group B tools (CLI-backed) register only when `obsidian` is reachable.
 	// That keeps the tools/list surface honest: if the CLI isn't there, the
 	// tools that need it never get advertised.
