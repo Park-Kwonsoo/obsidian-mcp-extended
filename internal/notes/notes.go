@@ -311,9 +311,10 @@ type ToggleResult struct {
 var checkboxLineRe = regexp.MustCompile(`^(\s*-\s*\[)([ xX])(\]\s+)(.*)$`)
 
 // ToggleCheckbox sets the checked state of a task line whose body contains
-// `text` (trimmed, case-insensitive). Idempotent — toggling to the state
-// it's already in is a no-op.
-func ToggleCheckbox(v *vault.Vault, path, text string, checked bool) (ToggleResult, error) {
+// `text` (trimmed, case-insensitive). When section is non-empty the search is
+// scoped to that heading's block (same rules as ReadSection). Idempotent —
+// toggling to the state it's already in is a no-op.
+func ToggleCheckbox(v *vault.Vault, path, text, section string, checked bool) (ToggleResult, error) {
 	if text == "" {
 		return ToggleResult{}, errors.New("text must be non-empty")
 	}
@@ -322,9 +323,20 @@ func ToggleCheckbox(v *vault.Vault, path, text string, checked bool) (ToggleResu
 		return ToggleResult{}, err
 	}
 	lines := strings.Split(content, "\n")
+
+	// Determine the line range to search within.
+	start, end := 0, len(lines)
+	if sec := strings.TrimSpace(section); sec != "" {
+		r, err := sectionRange(lines, sec)
+		if err != nil {
+			return ToggleResult{}, fmt.Errorf("section %q: %w", sec, err)
+		}
+		start, end = r[0], r[1]
+	}
+
 	target := strings.ToLower(strings.TrimSpace(text))
-	for i, ln := range lines {
-		m := checkboxLineRe.FindStringSubmatch(ln)
+	for i := start; i < end; i++ {
+		m := checkboxLineRe.FindStringSubmatch(lines[i])
 		if m == nil {
 			continue
 		}
@@ -346,4 +358,29 @@ func ToggleCheckbox(v *vault.Vault, path, text string, checked bool) (ToggleResu
 		return ToggleResult{Path: rel, Text: body, Checked: checked, Found: true}, nil
 	}
 	return ToggleResult{Path: rel, Text: text, Found: false}, nil
+}
+
+// sectionRange returns [start, end) line indices for the section whose heading
+// contains `heading` case-insensitively, using the same rules as ReadSection.
+func sectionRange(lines []string, heading string) ([2]int, error) {
+	target := strings.ToLower(strings.TrimSpace(heading))
+	for i, ln := range lines {
+		lvl, text := headingLevel(ln)
+		if lvl == 0 {
+			continue
+		}
+		probe := strings.ToLower(emojiSuffix.ReplaceAllString(text, ""))
+		if !strings.Contains(probe, target) {
+			continue
+		}
+		end := len(lines)
+		for j := i + 1; j < len(lines); j++ {
+			if nlvl, _ := headingLevel(lines[j]); nlvl > 0 && nlvl <= lvl {
+				end = j
+				break
+			}
+		}
+		return [2]int{i + 1, end}, nil
+	}
+	return [2]int{}, ErrSectionNotFound
 }

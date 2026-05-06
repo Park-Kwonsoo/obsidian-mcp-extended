@@ -41,6 +41,7 @@ type patchNoteArgs struct {
 type toggleCheckboxArgs struct {
 	Path    string `json:"path"    jsonschema:"note path or bare filename"`
 	Text    string `json:"text"    jsonschema:"case-insensitive substring of the task body"`
+	Section string `json:"section,omitempty" jsonschema:"optional heading — restrict search to this section only"`
 	Checked bool   `json:"checked" jsonschema:"true to mark done, false to uncheck"`
 }
 
@@ -108,9 +109,9 @@ func registerNoteTools(server *mcp.Server, v *vault.Vault) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "toggle-checkbox",
-		Description: "Toggle the checked state of a task line (`- [ ]` / `- [x]`) inside a note. Matches by case-insensitive substring of the task body.",
+		Description: "Toggle the checked state of a task line (`- [ ]` / `- [x]`) inside a note. Matches by case-insensitive substring of the task body. Use section to restrict the search to a specific heading block when the same task text appears in multiple sections.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, a toggleCheckboxArgs) (*mcp.CallToolResult, any, error) {
-		res, err := notes.ToggleCheckbox(v, a.Path, a.Text, a.Checked)
+		res, err := notes.ToggleCheckbox(v, a.Path, a.Text, a.Section, a.Checked)
 		if err != nil {
 			return nil, nil, err
 		}
