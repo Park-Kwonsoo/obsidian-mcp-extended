@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -195,7 +197,68 @@ func (e *Executor) ReadTemplate(ctx context.Context, name string, resolve bool) 
 	if err != nil {
 		return TemplateContent{}, err
 	}
-	return TemplateContent{Name: name, Content: r.Stdout}, nil
+	content := r.Stdout
+	if content == "" {
+		fallback, err := e.readTemplateFile(name)
+		if err != nil {
+			return TemplateContent{}, fmt.Errorf("template %q returned empty content and file fallback failed: %w", name, err)
+		}
+		content = fallback
+	}
+	return TemplateContent{Name: name, Content: content}, nil
+}
+
+type templateSettings struct {
+	Folder string `json:"folder"`
+}
+
+func (e *Executor) readTemplateFile(name string) (string, error) {
+	settingsPath := filepath.Join(e.VaultPath, ".obsidian", "templates.json")
+	settingsB, err := os.ReadFile(settingsPath)
+	if err != nil {
+		return "", err
+	}
+
+	var settings templateSettings
+	if err := json.Unmarshal(settingsB, &settings); err != nil {
+		return "", fmt.Errorf("parse %s: %w", settingsPath, err)
+	}
+	folder := strings.TrimSpace(settings.Folder)
+	if folder == "" {
+		return "", fmt.Errorf("template folder is not configured in %s", settingsPath)
+	}
+
+	base, err := filepath.Abs(filepath.Join(e.VaultPath, folder))
+	if err != nil {
+		return "", fmt.Errorf("resolve template folder: %w", err)
+	}
+
+	rel := filepath.Clean(strings.TrimSpace(name))
+	if rel == "." || rel == "" || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("invalid template name %q", name)
+	}
+
+	candidates := []string{rel}
+	if !strings.EqualFold(filepath.Ext(rel), ".md") {
+		candidates = append(candidates, rel+".md")
+	}
+	for _, candidate := range candidates {
+		path, err := filepath.Abs(filepath.Join(base, candidate))
+		if err != nil {
+			return "", fmt.Errorf("resolve template path: %w", err)
+		}
+		if path != base && !strings.HasPrefix(path, base+string(filepath.Separator)) {
+			return "", fmt.Errorf("template path escapes template folder: %q", name)
+		}
+		content, err := os.ReadFile(path)
+		if err == nil {
+			return string(content), nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+	}
+	return "", fmt.Errorf("template file not found for %q under %s", name, base)
 }
 
 // Task is one line in the vault that parses as an Obsidian task (`- [ ]`
