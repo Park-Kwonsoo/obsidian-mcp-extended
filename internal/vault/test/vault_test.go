@@ -58,6 +58,42 @@ func TestOpen_RejectsFile(t *testing.T) {
 	}
 }
 
+// TestOpen_ResolvesSymlinkedRoot guards the iCloud-style setup where the vault
+// path is a symlink to the real directory (e.g. ~/vault ->
+// .../iCloud~md~obsidian/Documents/<vault>). filepath.WalkDir starts with
+// os.Lstat(root), which reports a symlink as a non-directory, so the walk never
+// descends and ListMarkdown/Resolve silently return zero notes on a fully
+// populated vault. Open must pin Root to the resolved real path via
+// EvalSymlinks. Without that fix this test sees an empty listing.
+func TestOpen_ResolvesSymlinkedRoot(t *testing.T) {
+	real := t.TempDir()
+	writeFile(t, filepath.Join(real, "notes/a.md"), "# A")
+	writeFile(t, filepath.Join(real, "deep/nested/c.md"), "# C")
+
+	link := filepath.Join(t.TempDir(), "vault-link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+
+	v, err := vault.Open(link)
+	if err != nil {
+		t.Fatalf("open symlinked vault: %v", err)
+	}
+
+	got, err := v.ListMarkdown("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"deep/nested/c.md", "notes/a.md"}; !eqSlice(got, want) {
+		t.Errorf("symlinked-root listing mismatch\nwant %v\ngot  %v", want, got)
+	}
+
+	// Wikilink resolution also walks Root, so it must work through the symlink.
+	if _, err := v.Resolve("c"); err != nil {
+		t.Errorf("wikilink resolve through symlinked root: %v", err)
+	}
+}
+
 func TestListMarkdown_RootAndSubdir(t *testing.T) {
 	v := buildVault(t)
 

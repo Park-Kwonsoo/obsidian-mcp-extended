@@ -31,6 +31,16 @@ func Open(root string) (*Vault, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve vault root: %w", err)
 	}
+	// Resolve symlinks in the root. A symlinked vault (e.g. ~/vault -> an
+	// iCloud Drive directory) breaks filepath.WalkDir: WalkDir starts with
+	// os.Lstat(root), and a symlink reports as a non-directory, so the walk
+	// descends into nothing and ListMarkdown/Resolve silently return zero
+	// notes. Pinning Root to the real path makes every walk work. If
+	// resolution fails (e.g. a not-yet-existing path) keep abs and let the
+	// os.Stat below surface the real error.
+	if resolved, evalErr := filepath.EvalSymlinks(abs); evalErr == nil {
+		abs = resolved
+	}
 	info, err := os.Stat(abs)
 	if err != nil {
 		return nil, fmt.Errorf("stat vault root: %w", err)
