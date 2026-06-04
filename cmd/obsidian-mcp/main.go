@@ -10,8 +10,10 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -31,14 +33,22 @@ var version = "dev"
 type Config struct {
 	Vault       string
 	ObsidianCLI string // reserved for P2+ Group B tools; validated at startup
+	Transport   string
+	HTTPHost    string
+	HTTPPort    int
+	HTTPPath    string
 }
 
 func parseConfig() Config {
 	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	vaultFlag := fs.String("vault", "", "path to the Obsidian vault (required)")
 	cliFlag := fs.String("obsidian-cli", "", "path to the obsidian CLI binary (default: $PATH lookup)")
+	transportFlag := fs.String("transport", "stdio", "transport to serve MCP over: stdio or streamable-http")
+	httpHostFlag := fs.String("http-host", "127.0.0.1", "host for streamable-http transport")
+	httpPortFlag := fs.Int("http-port", 47610, "port for streamable-http transport")
+	httpPathFlag := fs.String("http-path", "/mcp", "path for streamable-http transport")
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "usage: %s --vault <path> [--obsidian-cli <path>]\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "usage: %s --vault <path> [--obsidian-cli <path>] [--transport stdio|streamable-http]\n", os.Args[0])
 		fs.PrintDefaults()
 	}
 	fs.Parse(os.Args[1:])
@@ -54,7 +64,30 @@ func parseConfig() Config {
 	if err != nil {
 		log.Fatalf("resolve vault: %v", err)
 	}
-	cfg := Config{Vault: abs, ObsidianCLI: *cliFlag}
+	transport := strings.ToLower(*transportFlag)
+	if transport == "http" {
+		transport = "streamable-http"
+	}
+	if transport != "stdio" && transport != "streamable-http" {
+		log.Fatalf("unsupported transport %q; use stdio or streamable-http", *transportFlag)
+	}
+
+	httpPath := *httpPathFlag
+	if httpPath == "" {
+		httpPath = "/mcp"
+	}
+	if !strings.HasPrefix(httpPath, "/") {
+		httpPath = "/" + httpPath
+	}
+
+	cfg := Config{
+		Vault:       abs,
+		ObsidianCLI: *cliFlag,
+		Transport:   transport,
+		HTTPHost:    *httpHostFlag,
+		HTTPPort:    *httpPortFlag,
+		HTTPPath:    httpPath,
+	}
 	if cfg.ObsidianCLI != "" {
 		if info, err := os.Stat(cfg.ObsidianCLI); err != nil || info.IsDir() {
 			log.Fatalf("obsidian-cli not a file: %s", cfg.ObsidianCLI)
@@ -507,7 +540,28 @@ func main() {
 		registerCLITools(server, cliExec)
 	}
 
-	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil {
-		log.Fatalf("server error: %v", err)
+	switch cfg.Transport {
+	case "stdio":
+		if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil {
+			log.Fatalf("server error: %v", err)
+		}
+	case "streamable-http":
+		handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+			return server
+		}, nil)
+		mux := http.NewServeMux()
+		mux.HandleFunc(cfg.HTTPPath, func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet && r.Header.Get("Mcp-Session-Id") == "" {
+				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+				_, _ = w.Write([]byte("ok\n"))
+				return
+			}
+			handler.ServeHTTP(w, r)
+		})
+		addr := fmt.Sprintf("%s:%d", cfg.HTTPHost, cfg.HTTPPort)
+		log.Printf("obsidian-mcp listening on http://%s%s", addr, cfg.HTTPPath)
+		if err := http.ListenAndServe(addr, mux); err != nil {
+			log.Fatalf("server error: %v", err)
+		}
 	}
 }
