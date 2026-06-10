@@ -1,7 +1,7 @@
 // MCP handlers for the Group B tools — the ones that route through the
 // `obsidian` CLI because their semantics (link auto-update on rename/move,
-// daily-note path resolution, template rendering) depend on a running
-// Obsidian app and have no filesystem equivalent.
+// daily-note path resolution) depend on a running Obsidian app and have no
+// filesystem equivalent.
 //
 // registerCLITools is called only when the CLI detection succeeds at
 // startup. When Obsidian isn't available, these tools simply don't appear
@@ -125,8 +125,24 @@ func registerCLITools(server *mcp.Server, exec *obscli.Executor) {
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
+		Name:        "list-tasks",
+		Description: "List tasks in the vault. Filters: done (checked), todo (unchecked), daily (today's daily note only).",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, a listTasksArgs) (*mcp.CallToolResult, any, error) {
+		res, err := exec.ListTasks(ctx, obscli.TaskFilters{Done: a.Done, Todo: a.Todo, Daily: a.Daily})
+		if err != nil {
+			return nil, nil, err
+		}
+		return toolResult(fmt.Sprintf("%d tasks", res.Count), res)
+	})
+}
+
+func registerTemplateTools(server *mcp.Server, exec *obscli.Executor) {
+	if exec == nil {
+		return
+	}
+	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list-templates",
-		Description: "List available Obsidian templates.",
+		Description: "List available Obsidian templates. Uses the Obsidian CLI when available, with filesystem fallback.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
 		res, err := exec.ListTemplates(ctx)
 		if err != nil {
@@ -137,23 +153,12 @@ func registerCLITools(server *mcp.Server, exec *obscli.Executor) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "read-template",
-		Description: "Read a template by name. Set resolve=true to evaluate {{placeholders}} before returning.",
+		Description: "Read a template by name. Set resolve=true to evaluate {{placeholders}} through Obsidian CLI when available.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, a readTemplateArgs) (*mcp.CallToolResult, any, error) {
 		res, err := exec.ReadTemplate(ctx, a.Name, a.Resolve)
 		if err != nil {
 			return nil, nil, err
 		}
 		return toolResult(fmt.Sprintf("template %s (%d bytes)", res.Name, len(res.Content)), res)
-	})
-
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "list-tasks",
-		Description: "List tasks in the vault. Filters: done (checked), todo (unchecked), daily (today's daily note only).",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, a listTasksArgs) (*mcp.CallToolResult, any, error) {
-		res, err := exec.ListTasks(ctx, obscli.TaskFilters{Done: a.Done, Todo: a.Todo, Daily: a.Daily})
-		if err != nil {
-			return nil, nil, err
-		}
-		return toolResult(fmt.Sprintf("%d tasks", res.Count), res)
 	})
 }

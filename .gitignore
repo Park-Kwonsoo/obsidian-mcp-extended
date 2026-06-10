@@ -26,3 +26,4 @@ bench/
 
 # Claude / local tooling
 .claude/settings.local.json
+.codegraph/

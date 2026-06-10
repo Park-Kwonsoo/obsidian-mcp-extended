@@ -3,10 +3,13 @@ package obscli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -174,10 +177,18 @@ type TemplatesResult struct {
 
 func (e *Executor) ListTemplates(ctx context.Context) (TemplatesResult, error) {
 	r, err := e.Exec(ctx, "templates", nil)
-	if err != nil {
+	if err == nil {
+		names := parsePathLines(r.Stdout)
+		return TemplatesResult{Templates: names, Count: len(names)}, nil
+	}
+	if !canFallbackToTemplateFiles(err) {
 		return TemplatesResult{}, err
 	}
-	names := parsePathLines(r.Stdout)
+
+	names, fallbackErr := e.listTemplateFiles()
+	if fallbackErr != nil {
+		return TemplatesResult{}, fmt.Errorf("templates CLI unavailable or reported vault not found (%v); file fallback failed: %w", err, fallbackErr)
+	}
 	return TemplatesResult{Templates: names, Count: len(names)}, nil
 }
 
@@ -194,25 +205,36 @@ func (e *Executor) ReadTemplate(ctx context.Context, name string, resolve bool) 
 		args["resolve"] = true
 	}
 	r, err := e.Exec(ctx, "template:read", args)
-	if err != nil {
+	if err == nil && r.Stdout != "" {
+		return TemplateContent{Name: name, Content: r.Stdout}, nil
+	}
+	if err != nil && !canFallbackToTemplateFiles(err) {
 		return TemplateContent{}, err
 	}
-	content := r.Stdout
-	if content == "" {
-		fallback, err := e.readTemplateFile(name)
+
+	content, fallbackErr := e.readTemplateFile(name)
+	if fallbackErr != nil {
 		if err != nil {
-			return TemplateContent{}, fmt.Errorf("template %q returned empty content and file fallback failed: %w", name, err)
+			return TemplateContent{}, fmt.Errorf("template %q CLI read failed: %v; file fallback failed: %w", name, err, fallbackErr)
 		}
-		content = fallback
+		return TemplateContent{}, fmt.Errorf("template %q returned empty content and file fallback failed: %w", name, fallbackErr)
 	}
 	return TemplateContent{Name: name, Content: content}, nil
+}
+
+func isVaultNotFoundError(err error) bool {
+	return errors.Is(err, ErrCLIFailed) && strings.Contains(strings.ToLower(err.Error()), "vault not found")
+}
+
+func canFallbackToTemplateFiles(err error) bool {
+	return errors.Is(err, ErrCLIUnavailable) || errors.Is(err, ErrCLITimeout) || isVaultNotFoundError(err)
 }
 
 type templateSettings struct {
 	Folder string `json:"folder"`
 }
 
-func (e *Executor) readTemplateFile(name string) (string, error) {
+func (e *Executor) templateFolder() (string, error) {
 	settingsPath := filepath.Join(e.VaultPath, ".obsidian", "templates.json")
 	settingsB, err := os.ReadFile(settingsPath)
 	if err != nil {
@@ -231,6 +253,43 @@ func (e *Executor) readTemplateFile(name string) (string, error) {
 	base, err := filepath.Abs(filepath.Join(e.VaultPath, folder))
 	if err != nil {
 		return "", fmt.Errorf("resolve template folder: %w", err)
+	}
+	return base, nil
+}
+
+func (e *Executor) listTemplateFiles() ([]string, error) {
+	base, err := e.templateFolder()
+	if err != nil {
+		return nil, err
+	}
+
+	var names []string
+	if err := filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.EqualFold(filepath.Ext(d.Name()), ".md") {
+			return nil
+		}
+		rel, err := filepath.Rel(base, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		rel = strings.TrimSuffix(rel, filepath.Ext(rel))
+		names = append(names, rel)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+func (e *Executor) readTemplateFile(name string) (string, error) {
+	base, err := e.templateFolder()
+	if err != nil {
+		return "", err
 	}
 
 	rel := filepath.Clean(strings.TrimSpace(name))

@@ -531,11 +531,12 @@ func main() {
 	// MOC discovery, section read, patch, checkbox toggle.
 	registerNoteTools(server, v)
 
-	// Group B tools (CLI-backed) register only when `obsidian` is reachable.
-	// That keeps the tools/list surface honest: if the CLI isn't there, the
-	// tools that need it never get advertised.
+	// Template tools have a filesystem fallback, so they stay available even
+	// when Obsidian is not running. The rest of the CLI-backed tools register
+	// only when `obsidian` is reachable.
 	ctx := context.Background()
 	cliExec := &obscli.Executor{Binary: cfg.ObsidianCLI, VaultPath: cfg.Vault}
+	registerTemplateTools(server, cliExec)
 	if cliExec.Detect(ctx) {
 		registerCLITools(server, cliExec)
 	}

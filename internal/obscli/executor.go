@@ -206,10 +206,9 @@ func buildArgList(args map[string]any) []string {
 // minor wording drift across CLI versions.
 var notRunningRe = regexp.MustCompile(`(?i)not running|connection refused|could not connect`)
 
-// errorPrefixRe catches `Error: <message>` on stdout — the Obsidian CLI
-// reports many failures this way with exit code 0, which is the single
-// most error-prone interaction pattern with this CLI.
-var errorPrefixRe = regexp.MustCompile(`^Error:\s`)
+// stdoutErrorRe catches diagnostics the Obsidian launch wrapper and CLI can
+// print to stdout while still exiting 0.
+var stdoutErrorRe = regexp.MustCompile(`(?i)^(Error:\s|Vault not found\.)`)
 
 // Exec runs `obsidian <command> vault=<name> <args>` and returns a cleaned
 // Result. Diagnoses:
@@ -258,9 +257,9 @@ func (e *Executor) Exec(ctx context.Context, command string, args map[string]any
 			fmt.Errorf("%w: %s: %s", ErrCLIFailed, command, stderr)
 	}
 
-	// Exit-0 with "Error: ..." on stdout — fooled plenty of earlier callers
-	// into treating error messages as data; catch it once, here.
-	if errorPrefixRe.MatchString(stdout) {
+	// Exit-0 with an error diagnostic on stdout — fooled plenty of earlier
+	// callers into treating error messages as data; catch it once, here.
+	if stdoutErrorRe.MatchString(stdout) {
 		return Result{Stdout: stdout, Stderr: stderr, ExitCode: 0},
 			fmt.Errorf("%w: %s: %s", ErrCLIFailed, command, stdout)
 	}
